@@ -3,6 +3,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Viewer } from "cesium";
 
+import PlaceSearch from "./PlaceSearch";
+import SplatControls, { type SplatStatus } from "./SplatControls";
+import type { GeocodeResult } from "@/lib/geocode";
+import {
+  SSE_RANGE,
+  loadSplatTileset,
+  resolveSplatSource,
+  type SplatSource,
+} from "@/lib/splatTilesets";
 import {
   DEFAULT_STACK_ID,
   ION_TOKEN,
@@ -22,18 +31,57 @@ declare global {
   }
 }
 
+/**
+ * `viewer.flyTo(tileset)` frames the bounding sphere so tightly that a small
+ * capture fills the screen from a metre away. Back off to a few radii and come
+ * in obliquely, which is how a splat capture actually reads.
+ */
+function splatFlightOptions(
+  Cesium: typeof import("cesium"),
+  tileset: import("cesium").Cesium3DTileset,
+) {
+  return {
+    duration: 3,
+    offset: new Cesium.HeadingPitchRange(
+      0,
+      Cesium.Math.toRadians(-35),
+      Math.max(tileset.boundingSphere.radius * 3, 20),
+    ),
+  };
+}
+
 export default function CesiumGlobe() {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<Viewer | null>(null);
   const cesiumRef = useRef<typeof import("cesium") | null>(null);
   const imageryLayerRef = useRef<import("cesium").ImageryLayer | null>(null);
   const stopSpinRef = useRef<(() => void) | null>(null);
+  const splatTilesetRef = useRef<import("cesium").Cesium3DTileset | null>(null);
+  // Splats visible this frame, accumulated by the tileVisible handler and
+  // published to React on a slow tick — a setState per frame would re-render
+  // the whole overlay 60 times a second.
+  const splatFrameCountRef = useRef(0);
 
   const [stackId, setStackId] = useState<MapStackId>(DEFAULT_STACK_ID);
   // Degrees below horizontal: 90 looks straight down, 0 sits on the horizon.
   const [tiltDeg, setTiltDeg] = useState(90);
   const [error, setError] = useState<string | null>(null);
   const [ready, setReady] = useState(false);
+
+  // This component is only ever loaded with `ssr: false`, so `window` exists on
+  // the first render and `?splat=<url>` can be read in the initialiser.
+  const [splatSource] = useState<SplatSource | null>(() =>
+    resolveSplatSource(window.location.search),
+  );
+  const [splatStatus, setSplatStatus] = useState<SplatStatus>("idle");
+  const [splatError, setSplatError] = useState<string | null>(null);
+  const [splatShown, setSplatShown] = useState(true);
+  const [splatsInView, setSplatsInView] = useState(0);
+  // Sticky version of "nothing was selected": a single empty frame happens
+  // routinely while the traversal re-settles, so the warning only appears once
+  // the tileset has genuinely stopped selecting tiles.
+  const [noTilesSelected, setNoTilesSelected] = useState(false);
+  const [sse, setSse] = useState<number>(SSE_RANGE.default);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -79,7 +127,12 @@ export default function CesiumGlobe() {
       viewerRef.current = viewer;
       imageryLayerRef.current = viewer.imageryLayers.get(0);
       if (process.env.NODE_ENV === "development") {
-        (window as unknown as { __viewer?: Viewer }).__viewer = viewer;
+        const debug = window as unknown as {
+          __viewer?: Viewer;
+          __Cesium?: typeof import("cesium");
+        };
+        debug.__viewer = viewer;
+        debug.__Cesium = Cesium;
       }
 
       if (!ION_TOKEN && keylessTerrain) {
@@ -131,6 +184,9 @@ export default function CesiumGlobe() {
       viewerRef.current = null;
       imageryLayerRef.current = null;
       stopSpinRef.current = null;
+      // The viewer owns the tileset once it is added to scene.primitives, so
+      // destroying the viewer destroys it too — just drop our handle.
+      splatTilesetRef.current = null;
     };
   }, []);
 
@@ -163,6 +219,161 @@ export default function CesiumGlobe() {
       new Cesium.HeadingPitchRange(camera.heading, Cesium.Math.toRadians(-deg), range),
     );
     camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
+  }, []);
+
+  /**
+   * Frames a Nominatim bounding box around the result's own point.
+   *
+   * Nominatim returns the box of the whole OSM object, which for an
+   * administrative area can reach far past the place itself — "Tokyo" comes
+   * back spanning its Pacific islands, 800km east of the city. Trimming each
+   * edge to its nearer twin keeps the point centred, and capping the aspect
+   * ratio stops one very lopsided axis from pulling the camera way out.
+   */
+  const frameFor = useCallback(
+    (Cesium: typeof import("cesium"), place: GeocodeResult) => {
+      const bbox = place.bbox;
+      // A house-sized box (or an antimeridian-wrapped one, which comes back
+      // with west > east) is not usable as a rectangle; fly to the point.
+      if (!bbox || bbox[2] <= bbox[0] || bbox[3] <= bbox[1]) return null;
+
+      const [west, south, east, north] = bbox;
+      let lonHalf = Math.min(place.lon - west, east - place.lon);
+      let latHalf = Math.min(place.lat - south, north - place.lat);
+      if (!(lonHalf > 0) || !(latHalf > 0)) return null;
+
+      const MAX_ASPECT = 4;
+      lonHalf = Math.min(lonHalf, latHalf * MAX_ASPECT);
+      latHalf = Math.min(latHalf, lonHalf * MAX_ASPECT);
+
+      // Below this the rectangle fit drops the camera into the terrain.
+      const MIN_HALF_DEG = 0.005;
+      if (lonHalf < MIN_HALF_DEG || latHalf < MIN_HALF_DEG) return null;
+
+      return Cesium.Rectangle.fromDegrees(
+        place.lon - lonHalf,
+        place.lat - latHalf,
+        place.lon + lonHalf,
+        place.lat + latHalf,
+      );
+    },
+    [],
+  );
+
+  /** Flies the camera to a search hit, top-down and north-up. */
+  const flyToPlace = useCallback(
+    (place: GeocodeResult) => {
+      const viewer = viewerRef.current;
+      const Cesium = cesiumRef.current;
+      if (!viewer || !Cesium || viewer.isDestroyed()) return;
+
+      stopSpinRef.current?.();
+      setTiltDeg(90);
+
+      viewer.camera.flyTo({
+        destination:
+          frameFor(Cesium, place) ??
+          Cesium.Cartesian3.fromDegrees(place.lon, place.lat, 2000),
+        orientation: {
+          heading: 0,
+          pitch: Cesium.Math.toRadians(-90),
+          roll: 0,
+        },
+        duration: 3,
+      });
+    },
+    [frameFor],
+  );
+
+  /**
+   * Loads the configured Gaussian splat tileset and frames it.
+   *
+   * LOD is plain 3D Tiles traversal: Cesium selects tiles by geometric error
+   * against `maximumScreenSpaceError`, then the splat renderer concatenates
+   * every selected tile into one buffer and depth-sorts it globally. So the
+   * detail slider below is just the tileset's SSE — there is no separate splat
+   * LOD control, and a tileset built as a single tile has no LODs to pick from
+   * no matter what the slider says.
+   */
+  const loadSplats = useCallback(async () => {
+    const viewer = viewerRef.current;
+    const Cesium = cesiumRef.current;
+    if (!viewer || !Cesium || viewer.isDestroyed() || !splatSource) return;
+    if (splatTilesetRef.current) return;
+
+    setSplatStatus("loading");
+    setSplatError(null);
+    try {
+      const tileset = await loadSplatTileset(Cesium, splatSource, sse);
+      if (viewer.isDestroyed()) return;
+
+      viewer.scene.primitives.add(tileset);
+      splatTilesetRef.current = tileset;
+
+      // `pointsLength` on splat content is the splat count for that tile, so
+      // summing the visible tiles shows the LOD selection changing live.
+      tileset.tileVisible.addEventListener(
+        (tile: import("cesium").Cesium3DTile) => {
+          splatFrameCountRef.current += tile.content.pointsLength;
+        },
+      );
+
+      setSplatStatus("loaded");
+      setSplatShown(true);
+      stopSpinRef.current?.();
+      await viewer.flyTo(tileset, splatFlightOptions(Cesium, tileset));
+    } catch (e: unknown) {
+      setSplatError(e instanceof Error ? e.message : String(e));
+      setSplatStatus("error");
+    }
+  }, [splatSource, sse]);
+
+  // Publish the per-frame splat tally about four times a second.
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer || splatStatus !== "loaded") return;
+
+    const { scene } = viewer;
+    let frame = 0;
+    let zeroPublishes = 0;
+    const tick = () => {
+      const count = splatFrameCountRef.current;
+      splatFrameCountRef.current = 0;
+      if (frame++ % 15 !== 0) return;
+
+      setSplatsInView(count);
+      zeroPublishes = count === 0 ? zeroPublishes + 1 : 0;
+      setNoTilesSelected(zeroPublishes >= 3);
+    };
+    scene.postRender.addEventListener(tick);
+    return () => {
+      if (!viewer.isDestroyed()) scene.postRender.removeEventListener(tick);
+    };
+  }, [splatStatus]);
+
+  const applySse = useCallback((value: number) => {
+    setSse(value);
+    const tileset = splatTilesetRef.current;
+    if (tileset && !tileset.isDestroyed()) {
+      tileset.maximumScreenSpaceError = value;
+    }
+  }, []);
+
+  const toggleSplatsShown = useCallback(() => {
+    const tileset = splatTilesetRef.current;
+    if (!tileset || tileset.isDestroyed()) return;
+    tileset.show = !tileset.show;
+    setSplatShown(tileset.show);
+  }, []);
+
+  const flyToSplats = useCallback(() => {
+    const viewer = viewerRef.current;
+    const Cesium = cesiumRef.current;
+    const tileset = splatTilesetRef.current;
+    if (!viewer || !Cesium || viewer.isDestroyed() || !tileset || tileset.isDestroyed())
+      return;
+    stopSpinRef.current?.();
+    viewer.flyTo(tileset, splatFlightOptions(Cesium, tileset));
   }, []);
 
   const switchStack = useCallback(
@@ -208,8 +419,25 @@ export default function CesiumGlobe() {
         </div>
       )}
 
-      <div className="pointer-events-none absolute left-4 top-4 rounded-md bg-black/50 px-3 py-2 text-xs text-zinc-300 backdrop-blur">
-        Drag to rotate · Scroll to zoom · Ctrl+drag to tilt
+      <div className="absolute left-4 top-4 flex flex-col gap-2">
+        {ready && <PlaceSearch onSelect={flyToPlace} />}
+        {ready && splatSource && (
+          <SplatControls
+            status={splatStatus}
+            error={splatError}
+            shown={splatShown}
+            splatsInView={splatsInView}
+            noTilesSelected={noTilesSelected}
+            sse={sse}
+            onLoad={loadSplats}
+            onToggleShown={toggleSplatsShown}
+            onSseChange={applySse}
+            onFlyTo={flyToSplats}
+          />
+        )}
+        <div className="pointer-events-none w-fit rounded-md bg-black/50 px-3 py-2 text-xs text-zinc-300 backdrop-blur">
+          Drag to rotate · Scroll to zoom · Ctrl+drag to tilt
+        </div>
       </div>
 
       {ready && (
