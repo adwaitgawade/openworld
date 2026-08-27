@@ -5,6 +5,7 @@ import type { Viewer } from "cesium";
 
 import PlaceSearch from "./PlaceSearch";
 import SplatControls, { type SplatStatus } from "./SplatControls";
+import BuildingsControls, { type BuildingsStatus } from "./BuildingsControls";
 import type { GeocodeResult } from "@/lib/geocode";
 import {
   SSE_RANGE,
@@ -12,6 +13,12 @@ import {
   resolveSplatSource,
   type SplatSource,
 } from "@/lib/splatTilesets";
+import {
+  DEFAULT_BUILDING_STYLE,
+  buildingStyle,
+  loadBuildings,
+  type BuildingStyleId,
+} from "@/lib/buildings";
 import {
   DEFAULT_STACK_ID,
   ION_TOKEN,
@@ -57,6 +64,7 @@ export default function CesiumGlobe() {
   const imageryLayerRef = useRef<import("cesium").ImageryLayer | null>(null);
   const stopSpinRef = useRef<(() => void) | null>(null);
   const splatTilesetRef = useRef<import("cesium").Cesium3DTileset | null>(null);
+  const buildingsTilesetRef = useRef<import("cesium").Cesium3DTileset | null>(null);
   // Splats visible this frame, accumulated by the tileVisible handler and
   // published to React on a slow tick — a setState per frame would re-render
   // the whole overlay 60 times a second.
@@ -82,6 +90,12 @@ export default function CesiumGlobe() {
   // the tileset has genuinely stopped selecting tiles.
   const [noTilesSelected, setNoTilesSelected] = useState(false);
   const [sse, setSse] = useState<number>(SSE_RANGE.default);
+
+  const [buildingsStatus, setBuildingsStatus] = useState<BuildingsStatus>("idle");
+  const [buildingsError, setBuildingsError] = useState<string | null>(null);
+  const [buildingsShown, setBuildingsShown] = useState(false);
+  const [buildingStyleId, setBuildingStyleId] =
+    useState<BuildingStyleId>(DEFAULT_BUILDING_STYLE);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -144,6 +158,9 @@ export default function CesiumGlobe() {
       scene.globe.enableLighting = true;
       scene.globe.showGroundAtmosphere = true;
       if (scene.skyAtmosphere) scene.skyAtmosphere.show = true;
+      // Without this, 3D Tiles buildings on the far side of a hill draw through
+      // the terrain instead of being occluded by it.
+      scene.globe.depthTestAgainstTerrain = true;
 
       // Slow idle spin that yields the moment the user touches the globe. It
       // must stop on *every* way in — a missed event type leaves the globe
@@ -187,6 +204,7 @@ export default function CesiumGlobe() {
       // The viewer owns the tileset once it is added to scene.primitives, so
       // destroying the viewer destroys it too — just drop our handle.
       splatTilesetRef.current = null;
+      buildingsTilesetRef.current = null;
     };
   }, []);
 
@@ -376,6 +394,52 @@ export default function CesiumGlobe() {
     viewer.flyTo(tileset, splatFlightOptions(Cesium, tileset));
   }, []);
 
+  /**
+   * Toggles the global buildings tileset, loading it on first use.
+   *
+   * The tileset is global and stays in the scene once loaded — hiding it is a
+   * `show` flip, not an unload, so turning it back on is instant. 3D Tiles
+   * traversal means nothing is actually fetched until the camera is close
+   * enough to a city for the building tiles to refine.
+   */
+  const toggleBuildings = useCallback(async () => {
+    const viewer = viewerRef.current;
+    const Cesium = cesiumRef.current;
+    if (!viewer || !Cesium || viewer.isDestroyed()) return;
+
+    const existing = buildingsTilesetRef.current;
+    if (existing && !existing.isDestroyed()) {
+      existing.show = !existing.show;
+      setBuildingsShown(existing.show);
+      return;
+    }
+    if (buildingsStatus === "loading") return;
+
+    setBuildingsStatus("loading");
+    setBuildingsError(null);
+    try {
+      const tileset = await loadBuildings(Cesium, buildingStyleId);
+      if (viewer.isDestroyed()) return;
+
+      viewer.scene.primitives.add(tileset);
+      buildingsTilesetRef.current = tileset;
+      setBuildingsStatus("loaded");
+      setBuildingsShown(true);
+    } catch (e: unknown) {
+      setBuildingsError(e instanceof Error ? e.message : String(e));
+      setBuildingsStatus("error");
+    }
+  }, [buildingsStatus, buildingStyleId]);
+
+  const applyBuildingStyle = useCallback((id: BuildingStyleId) => {
+    setBuildingStyleId(id);
+    const Cesium = cesiumRef.current;
+    const tileset = buildingsTilesetRef.current;
+    if (!Cesium || !tileset || tileset.isDestroyed()) return;
+    // On ion, `undefined` restores createOsmBuildingsAsync's tag-derived colouring.
+    tileset.style = buildingStyle(Cesium, id);
+  }, []);
+
   const switchStack = useCallback(
     async (next: MapStackId) => {
       const viewer = viewerRef.current;
@@ -421,6 +485,16 @@ export default function CesiumGlobe() {
 
       <div className="absolute left-4 top-4 flex flex-col gap-2">
         {ready && <PlaceSearch onSelect={flyToPlace} />}
+        {ready && (
+          <BuildingsControls
+            status={buildingsStatus}
+            error={buildingsError}
+            shown={buildingsShown}
+            style={buildingStyleId}
+            onToggle={toggleBuildings}
+            onStyleChange={applyBuildingStyle}
+          />
+        )}
         {ready && splatSource && (
           <SplatControls
             status={splatStatus}
