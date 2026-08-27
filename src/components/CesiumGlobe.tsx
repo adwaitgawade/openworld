@@ -20,11 +20,13 @@ import {
   type BuildingStyleId,
 } from "@/lib/buildings";
 import {
+  DEFAULT_LABELS,
   DEFAULT_STACK_ID,
   ION_TOKEN,
   MAP_STACKS,
-  createImageryProvider,
+  createImageryProviders,
   createTerrainProvider,
+  supportsLabels,
   type MapStackId,
 } from "@/lib/mapStacks";
 
@@ -61,7 +63,8 @@ export default function CesiumGlobe() {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<Viewer | null>(null);
   const cesiumRef = useRef<typeof import("cesium") | null>(null);
-  const imageryLayerRef = useRef<import("cesium").ImageryLayer | null>(null);
+  // Base layer first, then any transparent overlays stacked above it.
+  const imageryLayersRef = useRef<import("cesium").ImageryLayer[]>([]);
   const stopSpinRef = useRef<(() => void) | null>(null);
   const splatTilesetRef = useRef<import("cesium").Cesium3DTileset | null>(null);
   const buildingsTilesetRef = useRef<import("cesium").Cesium3DTileset | null>(null);
@@ -71,6 +74,7 @@ export default function CesiumGlobe() {
   const splatFrameCountRef = useRef(0);
 
   const [stackId, setStackId] = useState<MapStackId>(DEFAULT_STACK_ID);
+  const [labelsOn, setLabelsOn] = useState(DEFAULT_LABELS);
   // Degrees below horizontal: 90 looks straight down, 0 sits on the horizon.
   const [tiltDeg, setTiltDeg] = useState(90);
   const [error, setError] = useState<string | null>(null);
@@ -114,13 +118,13 @@ export default function CesiumGlobe() {
       }
 
       const [imagery, keylessTerrain] = await Promise.all([
-        createImageryProvider(Cesium, DEFAULT_STACK_ID),
+        createImageryProviders(Cesium, DEFAULT_STACK_ID, DEFAULT_LABELS),
         createTerrainProvider(Cesium),
       ]);
       if (disposed) return;
 
       const viewer = new Cesium.Viewer(container, {
-        baseLayer: new Cesium.ImageryLayer(imagery),
+        baseLayer: new Cesium.ImageryLayer(imagery[0]),
         baseLayerPicker: false,
         geocoder: false,
         animation: false,
@@ -139,7 +143,12 @@ export default function CesiumGlobe() {
           : undefined,
       });
       viewerRef.current = viewer;
-      imageryLayerRef.current = viewer.imageryLayers.get(0);
+      imageryLayersRef.current = [
+        viewer.imageryLayers.get(0),
+        ...imagery
+          .slice(1)
+          .map((overlay) => viewer.imageryLayers.addImageryProvider(overlay)),
+      ];
       if (process.env.NODE_ENV === "development") {
         const debug = window as unknown as {
           __viewer?: Viewer;
@@ -199,7 +208,7 @@ export default function CesiumGlobe() {
       disposed = true;
       viewerRef.current?.destroy();
       viewerRef.current = null;
-      imageryLayerRef.current = null;
+      imageryLayersRef.current = [];
       stopSpinRef.current = null;
       // The viewer owns the tileset once it is added to scene.primitives, so
       // destroying the viewer destroys it too — just drop our handle.
@@ -440,30 +449,42 @@ export default function CesiumGlobe() {
     tileset.style = buildingStyle(Cesium, id);
   }, []);
 
-  const switchStack = useCallback(
-    async (next: MapStackId) => {
+  /**
+   * Rebuilds the imagery stack for a base map and label state. Both the stack
+   * dropdown and the labels toggle funnel through here so a change to either
+   * rebuilds the same way.
+   */
+  const applyImagery = useCallback(
+    async (next: MapStackId, nextLabels: boolean) => {
       const viewer = viewerRef.current;
       const Cesium = cesiumRef.current;
       if (!viewer || !Cesium || viewer.isDestroyed()) return;
 
       stopSpinRef.current?.();
       setStackId(next);
+      setLabelsOn(nextLabels);
       try {
-        const provider = await createImageryProvider(Cesium, next);
+        const providers = await createImageryProviders(Cesium, next, nextLabels);
         if (viewer.isDestroyed()) return;
 
-        // Add the new layer beneath the old one, then drop the old one, so the
-        // globe never flashes an empty base layer mid-switch.
-        const layer = viewer.imageryLayers.addImageryProvider(provider, 0);
-        const previous = imageryLayerRef.current;
-        if (previous) viewer.imageryLayers.remove(previous, true);
-        imageryLayerRef.current = layer;
+        // Add the new layers beneath the old ones, then drop the old ones, so
+        // the globe never flashes an empty base layer mid-switch.
+        const layers = providers.map((provider, i) =>
+          viewer.imageryLayers.addImageryProvider(provider, i),
+        );
+        for (const previous of imageryLayersRef.current) {
+          viewer.imageryLayers.remove(previous, true);
+        }
+        imageryLayersRef.current = layers;
       } catch (e: unknown) {
         setError(e instanceof Error ? e.message : String(e));
       }
     },
     [],
   );
+
+  // OSM bakes labels into its tiles, so the toggle has nothing to add there.
+  const labelsAvailable = supportsLabels(stackId);
 
   return (
     <div className="relative h-full w-full bg-black">
@@ -515,27 +536,42 @@ export default function CesiumGlobe() {
       </div>
 
       {ready && (
-        <div className="absolute right-4 top-4 flex flex-col gap-1 rounded-md bg-black/50 p-1.5 backdrop-blur">
-          {MAP_STACKS.map((stack) => (
-            <button
-              key={stack.id}
-              type="button"
-              disabled={!stack.available}
-              onClick={() => switchStack(stack.id)}
-              title={
-                stack.available
-                  ? `${stack.label} — ${stack.note}`
-                  : `${stack.label} — needs a Bing Maps key or Cesium ion token`
-              }
-              className={`rounded px-2.5 py-1 text-left text-xs transition-colors ${
-                stackId === stack.id
-                  ? "bg-white/90 text-black"
-                  : "text-zinc-300 hover:bg-white/10"
-              } disabled:cursor-not-allowed disabled:text-zinc-600 disabled:hover:bg-transparent`}
+        <div className="absolute right-4 top-4 flex flex-col gap-2 rounded-md bg-black/50 p-2 backdrop-blur">
+          <label className="flex flex-col gap-1">
+            <span className="text-[10px] uppercase tracking-wide text-zinc-400">
+              Base map
+            </span>
+            <select
+              value={stackId}
+              onChange={(e) => applyImagery(e.target.value as MapStackId, labelsOn)}
+              title={MAP_STACKS.find((stack) => stack.id === stackId)?.note}
+              className="rounded bg-white/90 px-2 py-1 text-xs text-black outline-none"
             >
-              {stack.label}
-            </button>
-          ))}
+              {MAP_STACKS.map((stack) => (
+                <option key={stack.id} value={stack.id}>
+                  {stack.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <button
+            type="button"
+            disabled={!labelsAvailable}
+            onClick={() => applyImagery(stackId, !labelsOn)}
+            title={
+              labelsAvailable
+                ? "Roads, boundaries and place names over the imagery"
+                : "OpenStreetMap tiles already include labels"
+            }
+            className={`rounded px-2.5 py-1 text-xs transition-colors ${
+              labelsOn && labelsAvailable
+                ? "bg-white/90 text-black"
+                : "text-zinc-300 hover:bg-white/10"
+            } disabled:cursor-not-allowed disabled:text-zinc-600 disabled:hover:bg-transparent`}
+          >
+            Labels {labelsAvailable ? (labelsOn ? "on" : "off") : "—"}
+          </button>
         </div>
       )}
 
