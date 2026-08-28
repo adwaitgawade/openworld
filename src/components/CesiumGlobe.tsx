@@ -6,7 +6,10 @@ import type { Viewer } from "cesium";
 import PlaceSearch from "./PlaceSearch";
 import SplatControls, { type SplatStatus } from "./SplatControls";
 import BuildingsControls, { type BuildingsStatus } from "./BuildingsControls";
+import BuildingInfoCallout from "./BuildingInfoCallout";
 import type { GeocodeResult } from "@/lib/geocode";
+import { describeFeature, type BuildingInfo } from "@/lib/buildingInfo";
+import { fetchBuildingDetails, type BuildingDetails } from "@/lib/buildingDetails";
 import {
   SSE_RANGE,
   loadSplatTileset,
@@ -59,6 +62,14 @@ function splatFlightOptions(
   };
 }
 
+/**
+ * Selection highlight. Set straight onto the feature rather than through the
+ * tileset style: a style is a whole-tileset expression and re-evaluating one to
+ * pick out a single building would restyle every other building with it.
+ */
+const HIGHLIGHT_COLOR = (Cesium: typeof import("cesium")) =>
+  Cesium.Color.fromCssColorString("#ffd166");
+
 export default function CesiumGlobe() {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<Viewer | null>(null);
@@ -68,6 +79,13 @@ export default function CesiumGlobe() {
   const stopSpinRef = useRef<(() => void) | null>(null);
   const splatTilesetRef = useRef<import("cesium").Cesium3DTileset | null>(null);
   const buildingsTilesetRef = useRef<import("cesium").Cesium3DTileset | null>(null);
+  // The clicked building: the feature itself (to restore its colour), the
+  // colour it had before being highlighted, and the point on it the callout is
+  // pinned to. All refs — they are read from a postRender handler, which must
+  // not close over React state.
+  const pickedFeatureRef = useRef<import("cesium").Cesium3DTileFeature | null>(null);
+  const pickedColorRef = useRef<import("cesium").Color | null>(null);
+  const pickedAnchorRef = useRef<import("cesium").Cartesian3 | null>(null);
   // Splats visible this frame, accumulated by the tileVisible handler and
   // published to React on a slow tick — a setState per frame would re-render
   // the whole overlay 60 times a second.
@@ -100,6 +118,14 @@ export default function CesiumGlobe() {
   const [buildingsShown, setBuildingsShown] = useState(false);
   const [buildingStyleId, setBuildingStyleId] =
     useState<BuildingStyleId>(DEFAULT_BUILDING_STYLE);
+  const [pickedBuilding, setPickedBuilding] = useState<BuildingInfo | null>(null);
+  // Window coordinates of the anchor, or null while it is off-screen or hidden
+  // behind the globe.
+  const [calloutAt, setCalloutAt] = useState<{ x: number; y: number } | null>(null);
+  // Address and notability, fetched after the tile's own properties are already
+  // on screen — the panel must not wait on the network to show what it has.
+  const [details, setDetails] = useState<BuildingDetails | null>(null);
+  const [detailsError, setDetailsError] = useState<string | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -403,6 +429,44 @@ export default function CesiumGlobe() {
     viewer.flyTo(tileset, splatFlightOptions(Cesium, tileset));
   }, []);
 
+  /** Drops the current selection and puts the building back to its own colour. */
+  const clearSelection = useCallback(() => {
+    const feature = pickedFeatureRef.current;
+    if (feature && pickedColorRef.current && !feature.tileset.isDestroyed()) {
+      feature.color = pickedColorRef.current;
+    }
+    pickedFeatureRef.current = null;
+    pickedColorRef.current = null;
+    pickedAnchorRef.current = null;
+    setPickedBuilding(null);
+    setCalloutAt(null);
+    setDetails(null);
+    setDetailsError(null);
+  }, []);
+
+  // Address and notability for the current selection. Keyed on the query rather
+  // than the info object so re-picking the same building does not refetch, and
+  // aborted so a fast series of clicks cannot land an earlier building's
+  // details on a later one.
+  const query = pickedBuilding?.query;
+  const queryKey = query ? JSON.stringify(query) : null;
+  useEffect(() => {
+    if (!queryKey) return;
+
+    // No reset needed here: every selection change goes through
+    // `clearSelection` first, which has already emptied both.
+    const controller = new AbortController();
+
+    fetchBuildingDetails(JSON.parse(queryKey), controller.signal)
+      .then(setDetails)
+      .catch((e: unknown) => {
+        if (controller.signal.aborted) return;
+        setDetailsError(e instanceof Error ? e.message : String(e));
+      });
+
+    return () => controller.abort();
+  }, [queryKey]);
+
   /**
    * Toggles the global buildings tileset, loading it on first use.
    *
@@ -420,6 +484,7 @@ export default function CesiumGlobe() {
     if (existing && !existing.isDestroyed()) {
       existing.show = !existing.show;
       setBuildingsShown(existing.show);
+      if (!existing.show) clearSelection();
       return;
     }
     if (buildingsStatus === "loading") return;
@@ -438,16 +503,124 @@ export default function CesiumGlobe() {
       setBuildingsError(e instanceof Error ? e.message : String(e));
       setBuildingsStatus("error");
     }
-  }, [buildingsStatus, buildingStyleId]);
+  }, [buildingsStatus, buildingStyleId, clearSelection]);
 
-  const applyBuildingStyle = useCallback((id: BuildingStyleId) => {
-    setBuildingStyleId(id);
+  /**
+   * Click-to-inspect on the buildings tileset.
+   *
+   * `scene.pick` returns the individual `Cesium3DTileFeature` under the cursor,
+   * which is what carries the per-building properties — the tileset itself has
+   * none. The anchor comes from `scene.pickPosition`, the actual point on the
+   * roof or wall that was clicked, so the callout hangs off the building rather
+   * than off a tile centre; it falls back to the terrain under the cursor on
+   * the rare context where the depth texture is unavailable.
+   */
+  useEffect(() => {
+    const viewer = viewerRef.current;
     const Cesium = cesiumRef.current;
-    const tileset = buildingsTilesetRef.current;
-    if (!Cesium || !tileset || tileset.isDestroyed()) return;
-    // On ion, `undefined` restores createOsmBuildingsAsync's tag-derived colouring.
-    tileset.style = buildingStyle(Cesium, id);
-  }, []);
+    if (!ready || !viewer || !Cesium || viewer.isDestroyed()) return;
+
+    const { scene } = viewer;
+    const handler = new Cesium.ScreenSpaceEventHandler(scene.canvas);
+
+    handler.setInputAction(
+      ({ position }: { position: import("cesium").Cartesian2 }) => {
+        const tileset = buildingsTilesetRef.current;
+        const picked = scene.pick(position);
+        const isBuilding =
+          picked instanceof Cesium.Cesium3DTileFeature &&
+          tileset &&
+          !tileset.isDestroyed() &&
+          picked.tileset === tileset;
+
+        // A click on anything else — terrain, a splat, empty sky — dismisses.
+        if (!isBuilding) {
+          clearSelection();
+          return;
+        }
+
+        clearSelection();
+        const anchor =
+          (scene.pickPositionSupported ? scene.pickPosition(position) : undefined) ??
+          scene.camera.pickEllipsoid(position);
+        if (!anchor) return;
+
+        pickedFeatureRef.current = picked;
+        pickedColorRef.current = Cesium.Color.clone(picked.color);
+        pickedAnchorRef.current = anchor;
+        picked.color = HIGHLIGHT_COLOR(Cesium);
+
+        const carto = Cesium.Cartographic.fromCartesian(anchor);
+        setPickedBuilding(
+          describeFeature(picked, {
+            lat: Cesium.Math.toDegrees(carto.latitude),
+            lon: Cesium.Math.toDegrees(carto.longitude),
+          }),
+        );
+      },
+      Cesium.ScreenSpaceEventType.LEFT_CLICK,
+    );
+
+    // Keep the callout pinned to its point on the building as the camera moves.
+    // `worldToWindowCoordinates` happily projects a point on the far side of
+    // the planet onto the screen, so the anchor is horizon-tested first: if the
+    // ground normal there points away from the camera, the building has rotated
+    // round the back and the callout must go with it.
+    const scratch = new Cesium.Cartesian2();
+    const toCamera = new Cesium.Cartesian3();
+    const facesCamera = (anchor: import("cesium").Cartesian3) => {
+      const normal = Cesium.Ellipsoid.WGS84.geodeticSurfaceNormal(anchor);
+      if (!normal) return true;
+      Cesium.Cartesian3.subtract(scene.camera.positionWC, anchor, toCamera);
+      return Cesium.Cartesian3.dot(normal, toCamera) > 0;
+    };
+    let last: { x: number; y: number } | null = null;
+
+    const track = () => {
+      const anchor = pickedAnchorRef.current;
+      if (!anchor) return;
+
+      const window2d = facesCamera(anchor)
+        ? Cesium.SceneTransforms.worldToWindowCoordinates(scene, anchor, scratch)
+        : undefined;
+
+      if (!window2d) {
+        if (last) {
+          last = null;
+          setCalloutAt(null);
+        }
+        return;
+      }
+
+      // Sub-pixel jitter would re-render the overlay every frame for nothing.
+      const next = { x: Math.round(window2d.x), y: Math.round(window2d.y) };
+      if (last && last.x === next.x && last.y === next.y) return;
+      last = next;
+      setCalloutAt(next);
+    };
+    scene.postRender.addEventListener(track);
+
+    return () => {
+      handler.destroy();
+      if (!viewer.isDestroyed()) scene.postRender.removeEventListener(track);
+    };
+  }, [ready, clearSelection]);
+
+  const applyBuildingStyle = useCallback(
+    (id: BuildingStyleId) => {
+      setBuildingStyleId(id);
+      const Cesium = cesiumRef.current;
+      const tileset = buildingsTilesetRef.current;
+      if (!Cesium || !tileset || tileset.isDestroyed()) return;
+      // Re-evaluating the style overwrites every per-feature colour, including
+      // the highlight, so the selection has to go before the restore colour we
+      // are holding becomes meaningless.
+      clearSelection();
+      // On ion, `undefined` restores createOsmBuildingsAsync's tag-derived colouring.
+      tileset.style = buildingStyle(Cesium, id);
+    },
+    [clearSelection],
+  );
 
   /**
    * Rebuilds the imagery stack for a base map and label state. Both the stack
@@ -531,7 +704,7 @@ export default function CesiumGlobe() {
           />
         )}
         <div className="pointer-events-none w-fit rounded-md bg-black/50 px-3 py-2 text-xs text-zinc-300 backdrop-blur">
-          Drag to rotate · Scroll to zoom · Ctrl+drag to tilt
+          Drag to rotate · Scroll to zoom · Ctrl+drag to tilt{buildingsShown ? " · Click a building for details" : ""}
         </div>
       </div>
 
@@ -573,6 +746,18 @@ export default function CesiumGlobe() {
             Labels {labelsAvailable ? (labelsOn ? "on" : "off") : "—"}
           </button>
         </div>
+      )}
+
+      {pickedBuilding && calloutAt && (
+        <BuildingInfoCallout
+          key={queryKey}
+          info={pickedBuilding}
+          details={details}
+          detailsError={detailsError}
+          x={calloutAt.x}
+          y={calloutAt.y}
+          onClose={clearSelection}
+        />
       )}
 
       {ready && (
