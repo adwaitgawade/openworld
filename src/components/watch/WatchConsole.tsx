@@ -3,6 +3,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { MapStackId } from "@/lib/mapStacks";
+import {
+  BUILDING_STYLES,
+  DEFAULT_BUILDING_STYLE,
+  type BuildingStyleId,
+} from "@/lib/buildings";
+import { fetchBuildingDetails, type BuildingDetails } from "@/lib/buildingDetails";
+import type { BuildingInfo } from "@/lib/buildingInfo";
 import { distanceNm } from "@/lib/watch/geo";
 import { SENSORS } from "@/lib/watch/stations";
 import type { Alert, Sensor, Track } from "@/lib/watch/types";
@@ -22,6 +29,9 @@ const SENSOR_RANGE_NM = 40;
 /** Below this the timeline head counts as live. */
 const LIVE_EPSILON_MS = 30_000;
 
+/** Degrees below horizontal the camera starts at: straight down. */
+const DEFAULT_TILT = 90;
+
 const LIVE_LAYERS: Layers = {
   air: true,
   sea: true,
@@ -29,6 +39,7 @@ const LIVE_LAYERS: Layers = {
   cams: true,
   gaps: false,
   labels: false,
+  buildings: false,
 };
 
 const COVERAGE_LAYERS: Layers = {
@@ -38,6 +49,7 @@ const COVERAGE_LAYERS: Layers = {
   cams: true,
   gaps: true,
   labels: true,
+  buildings: false,
 };
 
 function pad(n: number): string {
@@ -56,7 +68,23 @@ export default function WatchConsole() {
   const [selectedAlertId, setSelectedAlertId] = useState<string | null>(null);
   const [selectedSensorId, setSelectedSensorId] = useState<string | null>(null);
   const [cursor, setCursor] = useState<{ lon: number; lat: number } | null>(null);
-  const [stats, setStats] = useState<GlobeStats>({ inView: 0, scaleMetres: 0 });
+  const [stats, setStats] = useState<GlobeStats>({
+    inView: 0,
+    scaleMetres: 0,
+    cameraHeight: 0,
+    modelled: 0,
+  });
+  const [tiltDeg, setTiltDeg] = useState(DEFAULT_TILT);
+  const [buildingStyleId, setBuildingStyleId] =
+    useState<BuildingStyleId>(DEFAULT_BUILDING_STYLE);
+  const [buildingsStatus, setBuildingsStatus] =
+    useState<"idle" | "loading" | "loaded" | "error">("idle");
+  const [building, setBuilding] = useState<BuildingInfo | null>(null);
+  // Window coordinates of the anchor, or null while it is off-screen or hidden
+  // behind the globe.
+  const [buildingAt, setBuildingAt] = useState<{ x: number; y: number } | null>(null);
+  const [buildingDetails, setBuildingDetails] = useState<BuildingDetails | null>(null);
+  const [buildingDetailsError, setBuildingDetailsError] = useState<string | null>(null);
   const [offsetMs, setOffsetMs] = useState(0);
   const [speed, setSpeed] = useState<number | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -224,6 +252,29 @@ export default function WatchConsole() {
     setLayers((previous) => ({ ...previous, [id]: !previous[id] }));
   }, []);
 
+  const applyTilt = useCallback((deg: number) => {
+    setTiltDeg(deg);
+    globeRef.current?.setTilt(deg);
+  }, []);
+
+  const clearBuilding = useCallback((info: BuildingInfo | null) => {
+    setBuilding(info);
+    // Every selection change comes through here, so the details that belonged
+    // to the previous building go with it rather than lingering under the new
+    // one's header while the fetch is in flight.
+    setBuildingDetails(null);
+    setBuildingDetailsError(null);
+  }, []);
+
+  const noteBuildingsStatus = useCallback(
+    (status: "idle" | "loading" | "loaded" | "error", error?: string) => {
+      setBuildingsStatus(status);
+      if (status === "error") say(`3D buildings failed to load — ${error ?? "unknown error"}`);
+      if (status === "loaded") say(BUILDING_STYLES.length ? "3D buildings on — zoom into a city to see them refine" : "3D buildings on");
+    },
+    [say],
+  );
+
   const applyView = useCallback(
     (next: ViewId) => {
       setCoverage(next === "coverage");
@@ -294,6 +345,7 @@ export default function WatchConsole() {
         lanes: "sea lanes",
         cams: "sensor sites",
         gaps: "coverage gaps",
+        buildings: "3D buildings",
         labels: "place labels",
       };
       for (const id of Object.keys(layerLabels) as LayerId[]) {
@@ -330,6 +382,30 @@ export default function WatchConsole() {
         },
       );
 
+      for (const preset of [
+        { label: "Horizon", deg: 8 },
+        { label: "Oblique", deg: 45 },
+        { label: "Top-down", deg: 90 },
+      ]) {
+        commands.push({
+          scope: "VIEW",
+          label: `Camera — ${preset.label}`,
+          run: () => applyTilt(preset.deg),
+        });
+      }
+
+      if (layers.buildings) {
+        for (const style of BUILDING_STYLES) {
+          if (style.id === buildingStyleId) continue;
+          commands.push({
+            scope: "VIEW",
+            label: `Buildings — ${style.label}`,
+            keys: style.note,
+            run: () => setBuildingStyleId(style.id),
+          });
+        }
+      }
+
       if (selected) {
         commands.push(
           {
@@ -355,9 +431,29 @@ export default function WatchConsole() {
     },
     [
       tracks, layers, stackId, selected, selectTrack, selectSensor,
-      toggleLayer, applyView, flyToTrack, copySelection,
+      toggleLayer, applyView, flyToTrack, copySelection, applyTilt,
+      buildingStyleId,
     ],
   );
+
+  // Address and notability for the current building. Keyed on the query rather
+  // than the info object so re-picking the same building does not refetch, and
+  // aborted so a fast series of clicks cannot land an earlier building's
+  // details on a later one.
+  const buildingQueryKey = building ? JSON.stringify(building.query) : null;
+  useEffect(() => {
+    if (!buildingQueryKey) return;
+    const controller = new AbortController();
+
+    fetchBuildingDetails(JSON.parse(buildingQueryKey), controller.signal)
+      .then(setBuildingDetails)
+      .catch((e: unknown) => {
+        if (controller.signal.aborted) return;
+        setBuildingDetailsError(e instanceof Error ? e.message : String(e));
+      });
+
+    return () => controller.abort();
+  }, [buildingQueryKey]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -406,6 +502,17 @@ export default function WatchConsole() {
           selected={selected}
           trail={trail}
           stackId={stackId}
+          buildingStyleId={buildingStyleId}
+          buildingsStatus={buildingsStatus}
+          building={building}
+          buildingAt={buildingAt}
+          buildingDetails={buildingDetails}
+          buildingDetailsError={buildingDetailsError}
+          onBuildingPick={clearBuilding}
+          onBuildingAnchor={setBuildingAt}
+          onBuildingsStatus={noteBuildingsStatus}
+          tiltDeg={tiltDeg}
+          onTilt={applyTilt}
           cursor={cursor}
           stats={stats}
           unresolved={unresolved}

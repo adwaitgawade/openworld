@@ -4,7 +4,11 @@ import dynamic from "next/dynamic";
 import type { Ref } from "react";
 
 import type { MapStackId } from "@/lib/mapStacks";
+import type { BuildingStyleId } from "@/lib/buildings";
+import type { BuildingInfo } from "@/lib/buildingInfo";
+import type { BuildingDetails } from "@/lib/buildingDetails";
 import type { Track } from "@/lib/watch/types";
+import BuildingInfoCallout from "../BuildingInfoCallout";
 import SelectionHud from "./SelectionHud";
 import type {
   GlobeStats,
@@ -31,7 +35,15 @@ const LAYER_ROWS: { id: LayerId; label: string; color: string }[] = [
   { id: "lanes", label: "LANES", color: "#6E7F8C" },
   { id: "cams", label: "SENSORS", color: "#7BE38A" },
   { id: "gaps", label: "COVERAGE GAPS", color: "#E8577F" },
+  { id: "buildings", label: "3D BUILDINGS", color: "#D8D6CE" },
   { id: "labels", label: "PLACE LABELS", color: "#8A877C" },
+];
+
+/** Degrees below horizontal, matching the explorer globe's three presets. */
+const TILT_PRESETS: { label: string; deg: number }[] = [
+  { label: "HORIZON", deg: 8 },
+  { label: "OBLIQUE", deg: 45 },
+  { label: "TOP-DOWN", deg: 90 },
 ];
 
 function group(n: number): string {
@@ -57,6 +69,17 @@ type Props = {
   selected: Track | null;
   trail: [number, number][];
   stackId: MapStackId;
+  buildingStyleId: BuildingStyleId;
+  buildingsStatus: "idle" | "loading" | "loaded" | "error";
+  building: BuildingInfo | null;
+  buildingAt: { x: number; y: number } | null;
+  buildingDetails: BuildingDetails | null;
+  buildingDetailsError: string | null;
+  onBuildingPick: (info: BuildingInfo | null) => void;
+  onBuildingAnchor: (at: { x: number; y: number } | null) => void;
+  onBuildingsStatus: (status: "idle" | "loading" | "loaded" | "error", error?: string) => void;
+  tiltDeg: number;
+  onTilt: (deg: number) => void;
   cursor: { lon: number; lat: number } | null;
   stats: GlobeStats;
   unresolved: number;
@@ -71,7 +94,10 @@ type Props = {
 
 export default function GlobeStage({
   globeRef, tracks, replay, layers, onLayer, counts, selected, trail, stackId,
-  cursor, stats, unresolved, now, onSelect, onCursor, onStats, onReady, onFollow, onCopy,
+  buildingStyleId, buildingsStatus, building, buildingAt, buildingDetails,
+  buildingDetailsError, onBuildingPick, onBuildingAnchor, onBuildingsStatus,
+  tiltDeg, onTilt, cursor, stats, unresolved, now, onSelect, onCursor, onStats,
+  onReady, onFollow, onCopy,
 }: Props) {
   const total = tracks.length;
 
@@ -85,10 +111,14 @@ export default function GlobeStage({
         selectedId={selected?.id ?? null}
         trail={trail}
         stackId={stackId}
+        buildingStyleId={buildingStyleId}
         onSelect={onSelect}
         onCursor={onCursor}
         onStats={onStats}
         onReady={onReady}
+        onBuildingPick={onBuildingPick}
+        onBuildingAnchor={onBuildingAnchor}
+        onBuildingsStatus={onBuildingsStatus}
       />
 
       <div className="wov wlayers">
@@ -106,6 +136,9 @@ export default function GlobeStage({
             {row.id === "air" && <b>{group(counts.air)}</b>}
             {row.id === "sea" && <b>{group(counts.sea)}</b>}
             {row.id === "cams" && <b>{counts.cams}</b>}
+            {row.id === "buildings" && layers.buildings && (
+              <b>{buildingsStatus === "loading" ? "…" : buildingsStatus === "error" ? "ERR" : "ON"}</b>
+            )}
           </button>
         ))}
       </div>
@@ -118,6 +151,10 @@ export default function GlobeStage({
         <div className="wro">
           <span>IN VIEW</span>
           <b>{group(stats.inView)}</b>
+        </div>
+        <div className="wro">
+          <span>AIRFRAMES</span>
+          <b>{stats.modelled > 0 ? group(stats.modelled) : "—"}</b>
         </div>
         <div className="wro">
           <span>UNRESOLVED</span>
@@ -137,6 +174,34 @@ export default function GlobeStage({
         </div>
       </div>
 
+      <div className="wov wtilt">
+        <div className="row">
+          <span>CAMERA ATTITUDE</span>
+          <b>{tiltDeg}°</b>
+        </div>
+        <input
+          type="range"
+          min={5}
+          max={90}
+          step={1}
+          value={tiltDeg}
+          aria-label="Camera angle below horizontal"
+          onChange={(e) => onTilt(Number(e.target.value))}
+        />
+        <div className="presets">
+          {TILT_PRESETS.map((preset) => (
+            <button
+              key={preset.label}
+              type="button"
+              className={tiltDeg === preset.deg ? "on" : undefined}
+              onClick={() => onTilt(preset.deg)}
+            >
+              {preset.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
       <div className="wscalebar">
         <i />
         <span>{fmtScale(stats.scaleMetres)}</span>
@@ -149,6 +214,21 @@ export default function GlobeStage({
           onFollow={onFollow}
           onCopy={onCopy}
           onClear={() => onSelect(null)}
+        />
+      )}
+
+      {building && buildingAt && (
+        <BuildingInfoCallout
+          key={JSON.stringify(building.query)}
+          info={building}
+          details={buildingDetails}
+          detailsError={buildingDetailsError}
+          x={buildingAt.x}
+          y={buildingAt.y}
+          onClose={() => {
+            onBuildingPick(null);
+            onBuildingAnchor(null);
+          }}
         />
       )}
     </div>

@@ -694,3 +694,65 @@
 .wstage .cesium-viewer,
 .wstage .cesium-widget,
 .wstage .cesium-widget canvas { height: 100%; width: 100%; }
+
+/* ── camera attitude ─────────────────────────────────────── */
+.wtilt {
+  bottom: 44px;
+  left: 12px;
+  padding: 8px 10px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  width: 186px;
+}
+.wtilt .row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  color: var(--faint);
+}
+.wtilt .row b { color: var(--txt); font-weight: 500; letter-spacing: 0.04em; font-size: 10.5px; }
+.wtilt input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 2px;
+  background: var(--line);
+  outline: none;
+  cursor: pointer;
+}
+.wtilt input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 9px;
+  height: 9px;
+  background: var(--acc);
+  cursor: pointer;
+}
+.wtilt input[type="range"]::-moz-range-thumb {
+  width: 9px;
+  height: 9px;
+  border: none;
+  background: var(--acc);
+  cursor: pointer;
+}
+.wtilt .presets { display: flex; }
+.wtilt .presets button {
+  flex: 1;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  padding: 3px 0;
+  border: 1px solid var(--line);
+  border-right: none;
+  color: var(--faint);
+  cursor: pointer;
+  background: none;
+}
+.wtilt .presets button:last-child { border-right: 1px solid var(--line); }
+.wtilt .presets button:hover { color: var(--txt); }
+.wtilt .presets button.on { color: var(--ink); background: var(--acc); border-color: var(--acc); }

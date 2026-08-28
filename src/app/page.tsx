@@ -1,5 +1,5 @@
-import WatchConsole from "@/components/watch/WatchConsole";
+import WatchConsoleView from "@/components/watch/WatchConsoleView";
 
 export default function Home() {
-  return <WatchConsole />;
+  return <WatchConsoleView />;
 }
