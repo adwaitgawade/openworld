@@ -75,6 +75,7 @@ export default function WatchConsole() {
     modelled: 0,
   });
   const [tiltDeg, setTiltDeg] = useState(DEFAULT_TILT);
+  const [pov, setPov] = useState(false);
   const [buildingStyleId, setBuildingStyleId] =
     useState<BuildingStyleId>(DEFAULT_BUILDING_STYLE);
   const [buildingsStatus, setBuildingsStatus] =
@@ -196,6 +197,9 @@ export default function WatchConsole() {
   }, [selectedTrackId, history, byId, live]);
 
   const selected = selectedTrackId ? (byId.get(selectedTrackId) ?? null) : null;
+  // A track can drop out of the feed mid-chase; when it does the camera comes
+  // free on its own rather than riding a position that stopped updating.
+  const povActive = pov && selected !== null;
 
   // ── actions ──────────────────────────────────────────────
   const flyToTrack = useCallback(
@@ -208,12 +212,17 @@ export default function WatchConsole() {
   const selectTrack = useCallback(
     (id: string | null, options: { fly?: boolean } = {}) => {
       setSelectedTrackId(id);
-      if (!id) return;
+      if (!id) {
+        // Nothing to ride with.
+        setPov(false);
+        return;
+      }
       setSelectedAlertId(null);
       const track = byId.get(id);
-      if (track && options.fly) flyToTrack(track);
+      // A chase already frames the track; flying the camera would fight it.
+      if (track && options.fly && !pov) flyToTrack(track);
     },
-    [byId, flyToTrack],
+    [byId, flyToTrack, pov],
   );
 
   const selectAlert = useCallback(
@@ -252,10 +261,29 @@ export default function WatchConsole() {
     setLayers((previous) => ({ ...previous, [id]: !previous[id] }));
   }, []);
 
-  const applyTilt = useCallback((deg: number) => {
-    setTiltDeg(deg);
-    globeRef.current?.setTilt(deg);
-  }, []);
+  const applyTilt = useCallback(
+    (deg: number) => {
+      setTiltDeg(deg);
+      // In POV the globe reads the angle straight off the prop each frame; the
+      // imperative pivot is only for a free camera.
+      if (!pov) globeRef.current?.setTilt(deg);
+    },
+    [pov],
+  );
+
+  const togglePov = useCallback(() => {
+    if (pov) {
+      setPov(false);
+      say("Camera released");
+      return;
+    }
+    if (!selectedTrackId) return;
+    setPov(true);
+    // The chase starts astern rather than overhead — top-down is what the
+    // camera was already doing, and it makes a poor ride-along.
+    setTiltDeg((deg) => (deg > 60 ? 18 : deg));
+    say(`Camera locked to ${byId.get(selectedTrackId)?.name ?? selectedTrackId} — chase angle on the attitude slider`);
+  }, [pov, selectedTrackId, byId, say]);
 
   const clearBuilding = useCallback((info: BuildingInfo | null) => {
     setBuilding(info);
@@ -410,6 +438,13 @@ export default function WatchConsole() {
         commands.push(
           {
             scope: "ACTION",
+            label: povActive
+              ? `Release the camera from ${selected.name}`
+              : `POV — ride with ${selected.name}`,
+            run: togglePov,
+          },
+          {
+            scope: "ACTION",
             label: `Centre on ${selected.name}`,
             run: () => flyToTrack(selected),
           },
@@ -432,7 +467,7 @@ export default function WatchConsole() {
     [
       tracks, layers, stackId, selected, selectTrack, selectSensor,
       toggleLayer, applyView, flyToTrack, copySelection, applyTilt,
-      buildingStyleId,
+      buildingStyleId, povActive, togglePov,
     ],
   );
 
@@ -513,6 +548,8 @@ export default function WatchConsole() {
           onBuildingsStatus={noteBuildingsStatus}
           tiltDeg={tiltDeg}
           onTilt={applyTilt}
+          pov={povActive}
+          onPov={togglePov}
           cursor={cursor}
           stats={stats}
           unresolved={unresolved}

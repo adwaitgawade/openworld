@@ -16,12 +16,17 @@ function fixAge(fixedAt: number, now: number): string {
 type Props = {
   track: Track;
   now: number;
+  /** True while the camera is locked to this track. */
+  pov: boolean;
+  onPov: () => void;
   onFollow: () => void;
   onCopy: () => void;
   onClear: () => void;
 };
 
-export default function SelectionHud({ track, now, onFollow, onCopy, onClear }: Props) {
+export default function SelectionHud({
+  track, now, pov, onPov, onFollow, onCopy, onClear,
+}: Props) {
   const sea = track.kind === "sea";
   const stale = now - track.fixedAt > 30 * 60_000;
 
@@ -74,7 +79,21 @@ export default function SelectionHud({ track, now, onFollow, onCopy, onClear }: 
       )}
 
       <div className="wacts">
-        <button type="button" className="wbtn pri" onClick={onFollow}>
+        {/* Exactly one accent button at a time: POV takes it while the camera is
+            locked to this track, CENTRE has it otherwise. */}
+        <button
+          type="button"
+          className={`wbtn${pov ? " pri" : ""}`}
+          onClick={onPov}
+          title={
+            pov
+              ? "Release the camera"
+              : `Lock the camera behind ${track.name} and follow it`
+          }
+        >
+          POV
+        </button>
+        <button type="button" className={`wbtn${pov ? "" : " pri"}`} onClick={onFollow}>
           CENTRE
         </button>
         <button type="button" className="wbtn" onClick={onCopy}>

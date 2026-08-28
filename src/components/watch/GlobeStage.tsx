@@ -80,6 +80,9 @@ type Props = {
   onBuildingsStatus: (status: "idle" | "loading" | "loaded" | "error", error?: string) => void;
   tiltDeg: number;
   onTilt: (deg: number) => void;
+  /** True while the camera is locked to the selected track. */
+  pov: boolean;
+  onPov: () => void;
   cursor: { lon: number; lat: number } | null;
   stats: GlobeStats;
   unresolved: number;
@@ -96,7 +99,7 @@ export default function GlobeStage({
   globeRef, tracks, replay, layers, onLayer, counts, selected, trail, stackId,
   buildingStyleId, buildingsStatus, building, buildingAt, buildingDetails,
   buildingDetailsError, onBuildingPick, onBuildingAnchor, onBuildingsStatus,
-  tiltDeg, onTilt, cursor, stats, unresolved, now, onSelect, onCursor, onStats,
+  tiltDeg, onTilt, pov, onPov, cursor, stats, unresolved, now, onSelect, onCursor, onStats,
   onReady, onFollow, onCopy,
 }: Props) {
   const total = tracks.length;
@@ -109,6 +112,8 @@ export default function GlobeStage({
         replay={replay}
         layers={layers}
         selectedId={selected?.id ?? null}
+        pov={pov}
+        tiltDeg={tiltDeg}
         trail={trail}
         stackId={stackId}
         buildingStyleId={buildingStyleId}
@@ -176,7 +181,9 @@ export default function GlobeStage({
 
       <div className="wov wtilt">
         <div className="row">
-          <span>CAMERA ATTITUDE</span>
+          {/* In POV the same angle swings the camera between astern of the
+              aircraft and above it, so the panel says what it is doing. */}
+          <span>{pov ? "CHASE ANGLE" : "CAMERA ATTITUDE"}</span>
           <b>{tiltDeg}°</b>
         </div>
         <input
@@ -211,6 +218,8 @@ export default function GlobeStage({
         <SelectionHud
           track={selected}
           now={now}
+          pov={pov}
+          onPov={onPov}
           onFollow={onFollow}
           onCopy={onCopy}
           onClear={() => onSelect(null)}

@@ -63,6 +63,10 @@ type Props = {
   replay: ReplayFrame | null;
   layers: Layers;
   selectedId: string | null;
+  /** True while the camera should ride with the selection. */
+  pov: boolean;
+  /** Degrees below horizontal; in POV this is the chase angle. */
+  tiltDeg: number;
   /** Past positions of the selection, oldest first. */
   trail: [number, number][];
   stackId: MapStackId;
@@ -110,6 +114,20 @@ const MODEL_CAMERA_HEIGHT_M = 3_500_000;
  */
 const HEADING_OFFSET_DEG = -90;
 
+/**
+ * How far the POV camera sits from what it is following. Far enough that the
+ * airframe reads as an aircraft rather than a wall, close enough that the
+ * ground beneath it moves.
+ */
+const POV_RANGE_AIR_M = 260;
+const POV_RANGE_SEA_M = 520;
+/**
+ * Straight down is a degenerate look direction — the up vector has nothing to
+ * resolve against and the view rolls — so the chase angle stops short of it.
+ */
+const POV_MAX_PITCH_DEG = 85;
+const POV_MIN_PITCH_DEG = 5;
+
 /** A ring drawn once and reused as the selection marker's billboard image. */
 function selectionRing(): HTMLCanvasElement {
   const size = 44;
@@ -134,7 +152,7 @@ const HIGHLIGHT_COLOR = (Cesium: typeof import("cesium")) =>
 
 const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
   {
-    tracks, replay, layers, selectedId, trail, stackId, buildingStyleId,
+    tracks, replay, layers, selectedId, pov, tiltDeg, trail, stackId, buildingStyleId,
     onSelect, onCursor, onStats, onReady, onBuildingPick, onBuildingAnchor,
     onBuildingsStatus,
   },
@@ -158,9 +176,21 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
   const labelsRef = useRef<import("cesium").LabelCollection | null>(null);
   const markerRef = useRef<import("cesium").BillboardCollection | null>(null);
 
-  // Aircraft models, created on first use and then reassigned frame to frame.
-  const modelsRef = useRef<import("cesium").Model[]>([]);
-  const modelPoolState = useRef<"empty" | "loading" | "ready">("empty");
+  /**
+   * Aircraft models, created on first use and then reassigned frame to frame.
+   *
+   * The pool is keyed to the viewer that owns it. React mounts effects twice in
+   * development, and the first mount's pool build is still running when the
+   * second one starts: without the key, that stale run finishes against a
+   * destroyed viewer and marks the pool "ready" while it is empty, so the live
+   * viewer never builds one and no airframe ever appears.
+   */
+  type ModelPool = {
+    viewer: Viewer;
+    models: import("cesium").Model[];
+    state: "empty" | "loading" | "ready";
+  };
+  const poolRef = useRef<ModelPool | null>(null);
 
   const buildingsRef = useRef<import("cesium").Cesium3DTileset | null>(null);
   const buildingsStateRef = useRef<"idle" | "loading" | "loaded" | "error">("idle");
@@ -183,6 +213,9 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
   const entriesRef = useRef<Entry[]>([]);
   const selectedRef = useRef<string | null>(null);
   const replayingRef = useRef(false);
+  // Read from the render loop, which must not re-subscribe when they change.
+  const povRef = useRef(pov);
+  const tiltRef = useRef(tiltDeg);
   const layersRef = useRef<Layers>(layers);
   // Set to true whenever the layer set or the track set changes, so the render
   // loop knows to re-apply visibility. Primitive `.show` flags have exactly one
@@ -276,6 +309,7 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
           : undefined,
       });
       viewerRef.current = viewer;
+      poolRef.current = { viewer, models: [], state: "empty" };
       if (process.env.NODE_ENV === "development") {
         // Same escape hatch CesiumGlobe exposes: poking at the live scene from
         // the console is how anything about this globe gets diagnosed.
@@ -400,8 +434,7 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
       viewerRef.current = null;
       entriesRef.current = [];
       imageryLayersRef.current = [];
-      modelsRef.current = [];
-      modelPoolState.current = "empty";
+      poolRef.current = null;
       // The viewer owns anything added to scene.primitives, so destroying it
       // destroys the tileset too — just drop our handle.
       buildingsRef.current = null;
@@ -453,7 +486,10 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
 
       if (!isBuilding) {
         clearBuildingSelection();
-        onSelect(null);
+        // Clicking past the aircraft mid-chase would otherwise drop the
+        // selection and end POV. CLEAR and the palette still do that
+        // deliberately; a missed click should not.
+        if (!povRef.current) onSelect(null);
         return;
       }
 
@@ -691,6 +727,14 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
     layersDirtyRef.current = true;
   }, [layers]);
 
+  useEffect(() => {
+    povRef.current = pov;
+  }, [pov]);
+
+  useEffect(() => {
+    tiltRef.current = tiltDeg;
+  }, [tiltDeg]);
+
   // ── selection marker, label and trail ────────────────────
   useEffect(() => {
     selectedRef.current = selectedId;
@@ -737,10 +781,21 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
     let lastStats = 0;
     let modelled = 0;
 
+    // POV runs every frame rather than at the projection rate — at 500 kt a
+    // 200ms step is 50 m, which reads as the camera stuttering along behind the
+    // aircraft. The entry it follows is refreshed by the projection pass below.
+    const povPosition = new Cesium.Cartesian3();
+    const povOffset = new Cesium.Cartesian3();
+    const povFrame = new Cesium.Matrix4();
+    const povHpr = new Cesium.HeadingPitchRoll(0, 0, 0);
+    let povEntry: Entry | null = null;
+    let cameraLocked = false;
+
     /** Builds the model pool the first time the camera comes low enough. */
     const ensureModels = () => {
-      if (modelPoolState.current !== "empty") return;
-      modelPoolState.current = "loading";
+      const pool = poolRef.current;
+      if (!pool || pool.viewer !== viewer || pool.state !== "empty") return;
+      pool.state = "loading";
       void (async () => {
         try {
           for (let i = 0; i < MAX_MODELS; i++) {
@@ -755,16 +810,21 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
               maximumScale: 20_000,
               incrementallyLoadTextures: false,
             });
-            if (viewer.isDestroyed()) return;
+            // This pool may have been replaced while the glTF was loading.
+            if (poolRef.current !== pool || viewer.isDestroyed()) return;
             model.show = false;
             scene.primitives.add(model);
-            modelsRef.current.push(model);
+            pool.models.push(model);
           }
-          modelPoolState.current = "ready";
-        } catch {
+          pool.state = "ready";
+        } catch (e) {
           // A missing or unreadable glb is not fatal: the console falls back to
-          // dots, which is what it drew before the model existed.
-          modelPoolState.current = "ready";
+          // dots, which is what it drew before the model existed. It should not
+          // be silent, though — that is a long hunt otherwise.
+          if (process.env.NODE_ENV === "development") {
+            console.error("[watch] aircraft model pool failed to build", e);
+          }
+          pool.state = "ready";
         }
       })();
     };
@@ -791,11 +851,14 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
           if (sensorPointsRef.current) sensorPointsRef.current.show = showing.cams;
           if (labelsRef.current) labelsRef.current.show = showing.labels;
           if (!showing.air) {
-            for (const model of modelsRef.current) model.show = false;
+            for (const model of poolRef.current?.models ?? []) model.show = false;
           }
         }
 
+        povEntry = null;
+
         for (const entry of entries) {
+          if (entry.id === selected) povEntry = entry;
           if (live && entry.kind === "air" && entry.hdg != null && entry.sog) {
             const seconds = Math.min(MAX_PROJECT_SEC, (now - entry.fixedAt) / 1000);
             const [lon, lat] = project(entry.lon, entry.lat, entry.hdg, entry.sog, seconds);
@@ -814,7 +877,9 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
         const wantModels = live && showing.air && height < MODEL_CAMERA_HEIGHT_M;
 
         if (wantModels) ensureModels();
-        const pool = modelsRef.current;
+        const owned = poolRef.current;
+        const pool = owned && owned.viewer === viewer ? owned.models : [];
+
 
         if (!wantModels || pool.length === 0) {
           if (modelled > 0) {
@@ -872,6 +937,43 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
           }
           modelled = take;
         }
+
+      }
+
+      // Ride with the selection. The aircraft's own heading frame is the
+      // reference, so the offset is simply "behind the nose and above it":
+      // -X is astern, +Z is up, and the chase angle swings between the two.
+      if (povRef.current && povEntry && !replayingRef.current) {
+        const entry = povEntry;
+        const seconds = Math.min(MAX_PROJECT_SEC, (now - entry.fixedAt) / 1000);
+        const [lon, lat] =
+          entry.kind === "air" && entry.hdg != null && entry.sog
+            ? project(entry.lon, entry.lat, entry.hdg, entry.sog, seconds)
+            : [entry.lon, entry.lat];
+
+        Cesium.Cartesian3.fromDegrees(lon, lat, entry.height, undefined, povPosition);
+        povHpr.heading = Cesium.Math.toRadians((entry.hdg ?? 0) + HEADING_OFFSET_DEG);
+        Cesium.Transforms.headingPitchRollToFixedFrame(
+          povPosition,
+          povHpr,
+          Cesium.Ellipsoid.WGS84,
+          Cesium.Transforms.eastNorthUpToFixedFrame,
+          povFrame,
+        );
+
+        const pitch = Cesium.Math.toRadians(
+          Math.min(POV_MAX_PITCH_DEG, Math.max(POV_MIN_PITCH_DEG, tiltRef.current)),
+        );
+        const range = entry.kind === "air" ? POV_RANGE_AIR_M : POV_RANGE_SEA_M;
+        povOffset.x = -range * Math.cos(pitch);
+        povOffset.y = 0;
+        povOffset.z = range * Math.sin(pitch);
+        camera.lookAtTransform(povFrame, povOffset);
+        cameraLocked = true;
+      } else if (cameraLocked) {
+        // Hand the camera back where it stands, rather than snapping it home.
+        cameraLocked = false;
+        camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
       }
 
       if (now - lastStats > STATS_INTERVAL_MS) {
@@ -923,7 +1025,11 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
 
     scene.postRender.addEventListener(tick);
     return () => {
-      if (!viewer.isDestroyed()) scene.postRender.removeEventListener(tick);
+      if (viewer.isDestroyed()) return;
+      scene.postRender.removeEventListener(tick);
+      // A camera left inside a reference frame ignores drag and zoom, so the
+      // lock must not outlive the loop that maintains it.
+      if (cameraLocked) camera.lookAtTransform(Cesium.Matrix4.IDENTITY);
     };
   }, [ready, onStats]);
 
