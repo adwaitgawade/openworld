@@ -18,8 +18,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "OpenWorld — 3D Earth",
-  description: "An interactive 3D view of the Earth built with CesiumJS.",
+  title: "MERIDIAN — Watch",
+  description:
+    "Global sensor-fusion watch floor: live ADS-B and AIS on a 3D earth.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
