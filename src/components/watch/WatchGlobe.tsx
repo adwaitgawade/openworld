@@ -115,6 +115,43 @@ const MODEL_CAMERA_HEIGHT_M = 3_500_000;
 const HEADING_OFFSET_DEG = -90;
 
 /**
+ * Vessels are billboards rather than meshes: one batched draw covers every ship
+ * on screen, where a per-vessel model would not. The sprite is drawn bow-up, so
+ * a heading of 0 needs no rotation at all.
+ */
+const VESSEL_URL = "/svg/modern-container-ship.svg";
+/**
+ * The sprite is drawn at true scale on the globe — a 300 m hull covers 300 m of
+ * sea — so these convert a hull length into the size of the whole image.
+ *
+ * The source is a 340 x 1760 viewBox with the hull spanning x 38-302 and
+ * y 30-1734, so the image is 1760/1704 longer than the ship it draws and
+ * 340/1704 as wide. Beam comes from the sprite's own proportions rather than
+ * the vessel's: stretching the width to a reported beam would squash the
+ * artwork, and length is what reads at this scale.
+ */
+const VESSEL_IMAGE_LENGTH_RATIO = 1760 / 1704;
+const VESSEL_IMAGE_WIDTH_RATIO = 340 / 1704;
+/**
+ * Hull length in metres when the AIS static report has not arrived, by vessel
+ * class. Rough class averages — a placeholder until the real dimensions come
+ * in, not a claim about the individual ship.
+ */
+const VESSEL_LENGTH_M: Record<string, number> = {
+  Cargo: 200, Tanker: 250, Passenger: 220, "High-speed craft": 60,
+  Military: 150, Fishing: 30, Towing: 40, Dredger: 80, Sailing: 15,
+  "Pleasure craft": 15, Pilot: 20, SAR: 50, Tug: 32, "Port tender": 25,
+  "Law enforcement": 30, Other: 90,
+};
+const VESSEL_LENGTH_DEFAULT_M = 120;
+/**
+ * Above this camera height vessels are dots. At true scale the sprite is only
+ * meant to be seen from alongside — a POV chase or a camera on the water — so
+ * the handover is deliberately low: anything above 100 m is a dot.
+ */
+const VESSEL_CAMERA_HEIGHT_M = 100;
+
+/**
  * How far the POV camera sits from what it is following. Far enough that the
  * airframe reads as an aircraft rather than a wall, close enough that the
  * ground beneath it moves.
@@ -127,6 +164,32 @@ const POV_RANGE_SEA_M = 520;
  */
 const POV_MAX_PITCH_DEG = 85;
 const POV_MIN_PITCH_DEG = 5;
+
+/**
+ * Geodetic north at a position, as a world-space unit vector. It is the vessel
+ * billboard's aligned axis: the sprite's up then points north on screen at any
+ * camera heading, and the billboard's own rotation carries the ship's heading
+ * off that.
+ */
+function northAxis(
+  Cesium: typeof import("cesium"),
+  lon: number,
+  lat: number,
+  result: import("cesium").Cartesian3,
+): import("cesium").Cartesian3 {
+  const rlon = Cesium.Math.toRadians(lon);
+  const rlat = Cesium.Math.toRadians(lat);
+  result.x = -Math.sin(rlat) * Math.cos(rlon);
+  result.y = -Math.sin(rlat) * Math.sin(rlon);
+  result.z = Math.cos(rlat);
+  return result;
+}
+
+/** A vessel's hull length in metres: what AIS reported, else its class average. */
+function hullLength(track: Track): number {
+  if (track.len != null && track.len > 0) return track.len;
+  return (track.cls && VESSEL_LENGTH_M[track.cls]) || VESSEL_LENGTH_DEFAULT_M;
+}
 
 /** A ring drawn once and reused as the selection marker's billboard image. */
 function selectionRing(): HTMLCanvasElement {
@@ -175,6 +238,7 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
   const trailRef = useRef<import("cesium").PolylineCollection | null>(null);
   const labelsRef = useRef<import("cesium").LabelCollection | null>(null);
   const markerRef = useRef<import("cesium").BillboardCollection | null>(null);
+  const shipsRef = useRef<import("cesium").BillboardCollection | null>(null);
 
   /**
    * Aircraft models, created on first use and then reassigned frame to frame.
@@ -209,6 +273,8 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
     sog: number | null;
     fixedAt: number;
     point: import("cesium").PointPrimitive;
+    /** The vessel sprite, for sea tracks in the live feed. */
+    ship: import("cesium").Billboard | null;
   };
   const entriesRef = useRef<Entry[]>([]);
   const selectedRef = useRef<string | null>(null);
@@ -347,6 +413,8 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
       labelsRef.current = labels;
       const markers = scene.primitives.add(new Cesium.BillboardCollection());
       markerRef.current = markers;
+      const ships = scene.primitives.add(new Cesium.BillboardCollection());
+      shipsRef.current = ships;
 
       // ── static geography ───────────────────────────────────
       for (const lane of LANES) {
@@ -660,9 +728,11 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
     if (!Cesium || !collection) return;
 
     collection.removeAll();
+    shipsRef.current?.removeAll();
     const air = Cesium.Color.fromCssColorString(AIR_COLOR);
     const sea = Cesium.Color.fromCssColorString(SEA_COLOR);
     const entries: Entry[] = [];
+    const ships = shipsRef.current;
 
     if (replay) {
       for (let i = 0; i < replay.ids.length; i++) {
@@ -676,6 +746,7 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
           hdg: null,
           sog: null,
           fixedAt: 0,
+          ship: null,
           point: collection.add({
             id: replay.ids[i],
             position: Cesium.Cartesian3.fromDegrees(replay.lon[i], replay.lat[i]),
@@ -689,8 +760,29 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
         // Aircraft fly at their reported altitude; a vessel's `alt` is draught,
         // which is depth below the waterline and not a height at all.
         const height = t.kind === "air" && t.alt != null ? t.alt * FT_TO_M : 0;
+        // A vessel with no reported heading keeps the sprite's own bearing —
+        // pointing it at a guess would read as data we do not have.
+        const ship =
+          t.kind === "sea" && ships
+            ? ships.add({
+                id: t.id,
+                position: Cesium.Cartesian3.fromDegrees(t.lon, t.lat),
+                image: VESSEL_URL,
+                sizeInMeters: true,
+                width: hullLength(t) * VESSEL_IMAGE_WIDTH_RATIO,
+                height: hullLength(t) * VESSEL_IMAGE_LENGTH_RATIO,
+                rotation: t.hdg != null ? -Cesium.Math.toRadians(t.hdg) : 0,
+                alignedAxis: northAxis(Cesium, t.lon, t.lat, new Cesium.Cartesian3()),
+                // Hulls sit on the ellipsoid, which sea-floor terrain pokes
+                // through in shallow water; without this they blink out as the
+                // camera drops.
+                disableDepthTestDistance: 20_000,
+                show: false,
+              })
+            : null;
         entries.push({
           id: t.id,
+          ship,
           kind: t.kind,
           lon: t.lon,
           lat: t.lat,
@@ -780,6 +872,8 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
     let lastProject = 0;
     let lastStats = 0;
     let modelled = 0;
+    /** Whether vessels are currently sprites rather than dots; null re-applies. */
+    let shipsShown: boolean | null = null;
 
     // POV runs every frame rather than at the projection rate — at 500 kt a
     // 200ms step is 50 m, which reads as the camera stuttering along behind the
@@ -846,6 +940,9 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
         if (layersDirtyRef.current) {
           layersDirtyRef.current = false;
           for (const entry of entries) entry.point.show = showing[entry.kind];
+          if (shipsRef.current) shipsRef.current.show = showing.sea;
+          // The dot-or-sprite pass below owns sea `.show` from here.
+          shipsShown = null;
           if (lanesRef.current) lanesRef.current.show = showing.lanes;
           if (gapsRef.current) gapsRef.current.show = showing.gaps;
           if (sensorPointsRef.current) sensorPointsRef.current.show = showing.cams;
@@ -874,6 +971,20 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
         // Airframes for the aircraft nearest the middle of the view, dots for
         // everything else.
         const height = camera.positionCartographic.height;
+
+        // Vessels are sprites once the camera is close enough for a hull to be
+        // more than a smudge, and dots above that. The whole set flips at once,
+        // so this only touches the billboards when the answer changes.
+        const wantShips = live && showing.sea && height < VESSEL_CAMERA_HEIGHT_M;
+        if (wantShips !== shipsShown) {
+          shipsShown = wantShips;
+          for (const entry of entries) {
+            if (!entry.ship) continue;
+            entry.ship.show = wantShips;
+            entry.point.show = showing.sea && !wantShips;
+          }
+        }
+
         const wantModels = live && showing.air && height < MODEL_CAMERA_HEIGHT_M;
 
         if (wantModels) ensureModels();

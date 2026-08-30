@@ -37,6 +37,8 @@ type Vessel = {
   fixedAt: number;
   cls: string | null;
   draught: number | null;
+  /** Overall length in metres, bow to stern, from the static report. */
+  len: number | null;
 };
 
 type Store = {
@@ -158,6 +160,9 @@ type AisEnvelope = {
       Name?: string;
       Type?: number;
       MaximumStaticDraught?: number;
+      /** Metres from the position reference to bow (A), stern (B), port (C)
+       *  and starboard (D). A + B is the hull's overall length. */
+      Dimension?: { A?: number; B?: number; C?: number; D?: number };
     };
   };
 };
@@ -201,6 +206,7 @@ function handle(raw: string) {
       fixedAt: Number.isFinite(reportedAt) ? reportedAt : now,
       cls: existing?.cls ?? null,
       draught: existing?.draught ?? null,
+      len: existing?.len ?? null,
     });
 
     if (store.vessels.size > MAX_VESSELS) evict();
@@ -214,6 +220,15 @@ function handle(raw: string) {
     if (stat.Name?.trim()) v.name = stat.Name.trim();
     v.cls = shipClass(stat.Type) ?? v.cls;
     v.draught = stat.MaximumStaticDraught ?? v.draught;
+    const dim = stat.Dimension;
+    if (dim) {
+      // Both halves are needed: a receiver that reports only A is giving the
+      // distance to the aerial, not a hull length. 511 is the AIS "unavailable"
+      // sentinel for these fields.
+      const bow = dim.A ?? 0;
+      const stern = dim.B ?? 0;
+      if (bow > 0 && stern > 0 && bow < 511 && stern < 511) v.len = bow + stern;
+    }
   }
 }
 
@@ -326,6 +341,7 @@ export function aisTracks(): Track[] {
       alt: v.draught,
       flag: MID[v.mmsi.slice(0, 3)] ?? null,
       cls: v.cls,
+      len: v.len,
       fixedAt: v.fixedAt,
       gapMinutes: Math.round(age / 60_000),
       source: "aisstream",

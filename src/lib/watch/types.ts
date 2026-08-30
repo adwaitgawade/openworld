@@ -24,6 +24,11 @@ export type Track = {
   flag: string | null;
   /** Aircraft type / vessel class, when reported. */
   cls: string | null;
+  /**
+   * Overall hull length in metres, from the AIS static report's dimensions.
+   * Absent for aircraft and for vessels that have not sent a static message.
+   */
+  len?: number | null;
   /** Epoch ms of the position report itself, not of our poll. */
   fixedAt: number;
   /** True while the aircraft is squawking 7500/7600/7700. */
