@@ -145,9 +145,11 @@ function RouteBand({
       <div className="wroute rnone">
         {state.loading
           ? "RESOLVING ROUTE\u2026"
-          : state.error
-            ? "LOOKUP UNAVAILABLE"
-            : "NO SCHEDULED ROUTE"}
+          : state.rateLimited
+            ? "RATE LIMITED \u00b7 ADSBDB"
+            : state.error
+              ? "LOOKUP UNAVAILABLE"
+              : "NO SCHEDULED ROUTE"}
       </div>
     );
   }

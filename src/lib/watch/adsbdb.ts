@@ -35,6 +35,26 @@ const MISS_TTL_MS = 60 * 60_000;
 const MAX_ENTRIES = 500;
 const TIMEOUT_MS = 6_000;
 
+/**
+ * Raised when adsbdb turns a lookup away for asking too often, as distinct from
+ * being down or not knowing the aircraft. Carried through to the browser so the
+ * HUD can say which it was.
+ */
+export class RateLimitedError extends Error {
+  /** Seconds adsbdb asks us to wait, when it says. */
+  readonly retryAfterSec: number | null;
+
+  constructor(retryAfterSec: number | null) {
+    super(
+      retryAfterSec == null
+        ? "adsbdb rate limit reached"
+        : `adsbdb rate limit reached — retry in ${retryAfterSec}s`,
+    );
+    this.name = "RateLimitedError";
+    this.retryAfterSec = retryAfterSec;
+  }
+}
+
 export type AircraftInfo = {
   /** ICAO24 / Mode-S hex, uppercase. */
   modeS: string;
@@ -243,6 +263,30 @@ async function get(path: string, callsign: string): Promise<AircraftDetail | nul
     // 404 carries {"response":"unknown aircraft"} or "unknown callsign" — an
     // answer about coverage, not a failure. null means "ask differently".
     if (res.status === 404) return null;
+
+    if (res.status === 429) {
+      // adsbdb states the wait in a `retry-after` header when it sets one, and
+      // otherwise in the body; neither is guaranteed, so the log degrades to
+      // "no interval given" rather than inventing one.
+      const header = res.headers.get("retry-after");
+      const parsed = header ? Number.parseInt(header, 10) : Number.NaN;
+      let retryAfterSec = Number.isFinite(parsed) ? parsed : null;
+
+      if (retryAfterSec == null) {
+        const body = await res.text().catch(() => "");
+        const seconds = /(\d+)\s*second/i.exec(body);
+        if (seconds) retryAfterSec = Number.parseInt(seconds[1], 10);
+      }
+
+      console.warn(
+        `[watch] adsbdb rate limited on ${path.split("?")[0]}` +
+        (retryAfterSec == null
+          ? " — no retry interval given"
+          : ` — retry in ${retryAfterSec}s`),
+      );
+      throw new RateLimitedError(retryAfterSec);
+    }
+
     if (!res.ok) throw new Error(`adsbdb ${res.status}`);
 
     const body = (await res.json()) as RawResponse;

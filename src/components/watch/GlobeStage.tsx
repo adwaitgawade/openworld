@@ -4,7 +4,7 @@ import dynamic from "next/dynamic";
 import { useState } from "react";
 import type { Ref } from "react";
 
-import type { MapStackId } from "@/lib/mapStacks";
+import { MAP_STACKS, type MapStackId } from "@/lib/mapStacks";
 import type { BuildingStyleId } from "@/lib/buildings";
 import type { BuildingInfo } from "@/lib/buildingInfo";
 import type { BuildingDetails } from "@/lib/buildingDetails";
@@ -104,6 +104,7 @@ type Props = {
   onAirport: (lon: number, lat: number) => void;
   trail: [number, number][];
   stackId: MapStackId;
+  onStack: (id: MapStackId) => void;
   buildingStyleId: BuildingStyleId;
   buildingsStatus: "idle" | "loading" | "loaded" | "error";
   building: BuildingInfo | null;
@@ -131,7 +132,7 @@ type Props = {
 };
 
 export default function GlobeStage({
-  globeRef, tracks, layers, onLayer, counts, selected, detail, route, onAirport, trail, stackId,
+  globeRef, tracks, layers, onLayer, counts, selected, detail, route, onAirport, trail, stackId, onStack,
   buildingStyleId, buildingsStatus, building, buildingAt, buildingDetails,
   buildingDetailsError, onBuildingPick, onBuildingAnchor, onBuildingsStatus,
   tiltDeg, onTilt, pov, onPov, cursor, stats, unresolved, now, onSelect, onCursor, onStats,
@@ -201,6 +202,25 @@ export default function GlobeStage({
             )}
           </button>
         ))}
+
+        {/* Base map. Two stacks that answer different questions — imagery for
+            what is there, street tiles for what it is called — so the switch
+            sits with the layer toggles rather than behind the palette. */}
+        <div className="wbase">
+          <i>BASE</i>
+          {MAP_STACKS.map((stack) => (
+            <button
+              key={stack.id}
+              type="button"
+              className={`wbasebtn${stackId === stack.id ? " on" : ""}`}
+              onClick={() => onStack(stack.id)}
+              title={`${stack.label} — ${stack.note}`}
+              aria-pressed={stackId === stack.id}
+            >
+              {stack.id === "esri" ? "SATELLITE" : "STREET"}
+            </button>
+          ))}
+        </div>
 
         <button
           type="button"

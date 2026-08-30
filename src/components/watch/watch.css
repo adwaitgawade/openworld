@@ -475,6 +475,40 @@
   font-style: normal;
   flex: none;
 }
+/* Base-map switch, sitting under the layer toggles. */
+.wbase {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 0 1px;
+}
+.wbase i {
+  font-family: var(--mono);
+  font-size: 8.5px;
+  letter-spacing: 0.13em;
+  color: var(--faint);
+  font-style: normal;
+  margin-right: 2px;
+}
+.wbasebtn {
+  flex: 1;
+  font-family: var(--mono);
+  font-size: 8.5px;
+  letter-spacing: 0.1em;
+  padding: 3px 0;
+  border: 1px solid var(--line);
+  background: none;
+  color: var(--faint);
+  cursor: pointer;
+  transition: color 120ms ease, border-color 120ms ease, background 120ms ease;
+}
+.wbasebtn:hover { color: var(--txt); }
+.wbasebtn.on {
+  color: var(--ink);
+  background: var(--acc);
+  border-color: var(--acc);
+}
+
 /* Airframe band: photo, type and operator, above the route. */
 .wac {
   display: flex;

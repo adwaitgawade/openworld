@@ -10,7 +10,12 @@
 
 import { NextResponse } from "next/server";
 
-import { aircraftDetail, normaliseCallsign, normaliseModeS } from "@/lib/watch/adsbdb";
+import {
+  aircraftDetail,
+  normaliseCallsign,
+  normaliseModeS,
+  RateLimitedError,
+} from "@/lib/watch/adsbdb";
 
 // The lookup cache lives in module state, which needs a long-lived process.
 export const runtime = "nodejs";
@@ -35,6 +40,30 @@ export async function GET(
     const detail = await aircraftDetail(modeS, callsign);
     return NextResponse.json(detail, { headers: { "cache-control": "no-store" } });
   } catch (e) {
+    // Being turned away for asking too often is its own condition: it is
+    // temporary, it is our fault rather than adsbdb's, and it is worth naming
+    // in both consoles. The status mirrors upstream so the browser's network
+    // pane says the same thing.
+    if (e instanceof RateLimitedError) {
+      return NextResponse.json(
+        {
+          ...EMPTY,
+          error: e.message,
+          rateLimited: true,
+          retryAfterSec: e.retryAfterSec,
+        },
+        {
+          status: 429,
+          headers: {
+            "cache-control": "no-store",
+            ...(e.retryAfterSec == null
+              ? {}
+              : { "retry-after": String(e.retryAfterSec) }),
+          },
+        },
+      );
+    }
+
     // A lookup that failed is not the same as an aircraft nothing is known
     // about, so it gets its own field and the HUD says so.
     return NextResponse.json(

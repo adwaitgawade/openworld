@@ -498,6 +498,7 @@ export default function WatchConsole() {
           onAirport={flyToAirport}
           trail={trail}
           stackId={stackId}
+          onStack={setStackId}
           buildingStyleId={buildingStyleId}
           buildingsStatus={buildingsStatus}
           building={building}

@@ -11,6 +11,8 @@ export type DetailState = AircraftDetail & {
   loading: boolean;
   /** Set only when the lookup itself failed — an unknown airframe is not an error. */
   error: string | null;
+  /** True when adsbdb turned the lookup away for asking too often. */
+  rateLimited: boolean;
 };
 
 const IDLE: DetailState = {
@@ -19,10 +21,15 @@ const IDLE: DetailState = {
   route: null,
   loading: false,
   error: null,
+  rateLimited: false,
 };
 
 /** What the last completed lookup returned, whichever aircraft it was for. */
-type Resolved = AircraftDetail & { key: string; error: string | null };
+type Resolved = AircraftDetail & {
+  key: string;
+  error: string | null;
+  rateLimited: boolean;
+};
 
 /**
  * The airframe and route for the selected aircraft.
@@ -55,13 +62,29 @@ export function useAircraftDetail(
           `/api/watch/aircraft/${encodeURIComponent(modeS)}${query}`,
           { signal: controller.signal, cache: "no-store" },
         );
-        const json = (await res.json()) as AircraftDetail & { error?: string };
+        const json = (await res.json()) as AircraftDetail & {
+          error?: string;
+          rateLimited?: boolean;
+          retryAfterSec?: number | null;
+        };
         if (controller.signal.aborted) return;
+
+        // Logged here as well as on the server: the operator watching the
+        // console is in the browser, and this is the one failure they can do
+        // something about.
+        if (res.status === 429 || json.rateLimited) {
+          console.warn(
+            `[watch] adsbdb rate limited — route and airframe unavailable for ${callsign ?? modeS}` +
+            (json.retryAfterSec == null ? "" : `, retry in ${json.retryAfterSec}s`),
+          );
+        }
+
         setResolved({
           key,
           aircraft: json.aircraft,
           route: json.route,
           error: res.ok ? null : (json.error ?? `lookup ${res.status}`),
+          rateLimited: res.status === 429 || Boolean(json.rateLimited),
         });
       } catch (e) {
         if (controller.signal.aborted) return;
@@ -70,6 +93,7 @@ export function useAircraftDetail(
           aircraft: null,
           route: null,
           error: e instanceof Error ? e.message : String(e),
+          rateLimited: false,
         });
       }
     })();
@@ -85,7 +109,15 @@ export function useAircraftDetail(
       route: resolved.route,
       loading: false,
       error: resolved.error,
+      rateLimited: resolved.rateLimited,
     };
   }
-  return { modeS, aircraft: null, route: null, loading: true, error: null };
+  return {
+    modeS,
+    aircraft: null,
+    route: null,
+    loading: true,
+    error: null,
+    rateLimited: false,
+  };
 }
