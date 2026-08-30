@@ -31,7 +31,15 @@ declare global {
   }
 }
 
-export type LayerId = "air" | "sea" | "lanes" | "cams" | "gaps" | "labels" | "buildings";
+export type LayerId =
+  | "air"
+  | "ground"
+  | "sea"
+  | "lanes"
+  | "cams"
+  | "gaps"
+  | "labels"
+  | "buildings";
 export type Layers = Record<LayerId, boolean>;
 
 export type ReplayFrame = {
@@ -81,6 +89,8 @@ type Props = {
 };
 
 const AIR_COLOR = "#4FD1E0";
+/** Surfaced aircraft: the air hue held back, so an apron does not read as traffic. */
+const GROUND_COLOR = "#2E8794";
 const SEA_COLOR = "#E8A33D";
 const ACCENT = "#4FD1E0";
 const SENSOR_COLOR = "#7BE38A";
@@ -94,6 +104,27 @@ const STATS_INTERVAL_MS = 500;
 /** The scale bar's drawn width, matching `.wscalebar i` in watch.css. */
 const SCALEBAR_PX = 76;
 const FT_TO_M = 0.3048;
+
+/**
+ * A surfaced aircraft is placed on the terrain, not at its reported altitude —
+ * feeds send 0, "ground" or nothing at all down there, and an airport apron is
+ * anywhere from sea level to 4 000 m.
+ *
+ * The height is sampled from the terrain provider rather than read off the
+ * rendered globe: `globe.getHeight` answers from whatever level of detail
+ * happens to be loaded, and a coarse tile is not merely imprecise — over
+ * Atlanta it returns −24 km. `sampleTerrainMostDetailed` costs a request per
+ * tile, so results are cached against the track id (an aircraft on a stand does
+ * not move enough for the ground under it to change) and new tracks are sampled
+ * a batch at a time.
+ */
+const GROUND_SAMPLE_BATCH = 300;
+/**
+ * The mesh's origin sits on the fuselage centreline; a 787-9 at rest carries it
+ * about this far above the tarmac. Without the lift a parked airframe is buried
+ * to its windows.
+ */
+const AIRFRAME_GROUND_CLEARANCE_M = 5.6;
 
 /**
  * Within this range a track's dot ignores the depth buffer.
@@ -139,6 +170,22 @@ const POV_RANGE_SEA_M = 520;
  */
 const POV_MAX_PITCH_DEG = 85;
 const POV_MIN_PITCH_DEG = 5;
+/**
+ * How close and how far the operator may orbit while riding along. The floor
+ * keeps the camera outside the airframe; the ceiling stops a stray wheel spin
+ * from leaving the chase entirely.
+ */
+const POV_MIN_RANGE_M = 30;
+const POV_MAX_RANGE_M = 40_000;
+
+/**
+ * Which layer switch owns a track's dot. Surfaced aircraft get their own so an
+ * operator watching ocean traffic can drop a thousand parked airframes without
+ * losing the air picture.
+ */
+function layerOf(entry: { kind: "air" | "sea"; onGround: boolean }): LayerId {
+  return entry.kind === "sea" ? "sea" : entry.onGround ? "ground" : "air";
+}
 
 /** A ring drawn once and reused as the selection marker's billboard image. */
 function selectionRing(): HTMLCanvasElement {
@@ -217,17 +264,25 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
     lat: number;
     /** Metres above the ellipsoid. */
     height: number;
+    /** Air only: the feed reports it on the surface. */
+    onGround: boolean;
+    /** On-ground only: `height` came from terrain rather than the fallback. */
+    grounded: boolean;
     hdg: number | null;
     sog: number | null;
     fixedAt: number;
     point: import("cesium").PointPrimitive;
   };
   const entriesRef = useRef<Entry[]>([]);
+  /** Resolved terrain height per on-ground track, kept across rebuilds. */
+  const groundHeightRef = useRef(new Map<string, number>());
   const selectedRef = useRef<string | null>(null);
   const replayingRef = useRef(false);
   // Read from the render loop, which must not re-subscribe when they change.
   const povRef = useRef(pov);
   const tiltRef = useRef(tiltDeg);
+  /** Set when the chase camera should be re-seated from the slider angle. */
+  const povSeatRef = useRef(true);
   const layersRef = useRef<Layers>(layers);
   // Set to true whenever the layer set or the track set changes, so the render
   // loop knows to re-apply visibility. Primitive `.show` flags have exactly one
@@ -673,6 +728,7 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
 
     collection.removeAll();
     const air = Cesium.Color.fromCssColorString(AIR_COLOR);
+    const ground = Cesium.Color.fromCssColorString(GROUND_COLOR);
     const sea = Cesium.Color.fromCssColorString(SEA_COLOR);
     const entries: Entry[] = [];
 
@@ -685,6 +741,8 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
           lon: replay.lon[i],
           lat: replay.lat[i],
           height: 0,
+          onGround: false,
+          grounded: false,
           hdg: null,
           sog: null,
           fixedAt: 0,
@@ -698,32 +756,50 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
         });
       }
     } else {
+      const cache = groundHeightRef.current;
+      const seen = new Set<string>();
+
       for (const t of tracks) {
+        const onGround = t.kind === "air" && Boolean(t.onGround);
         // Aircraft fly at their reported altitude; a vessel's `alt` is draught,
-        // which is depth below the waterline and not a height at all.
-        const height = t.kind === "air" && t.alt != null ? t.alt * FT_TO_M : 0;
+        // which is depth below the waterline and not a height at all; and one on
+        // the surface sits on the terrain, wherever that turns out to be.
+        const cached = onGround ? cache.get(t.id) : undefined;
+        const height = onGround
+          ? (cached ?? 0)
+          : t.kind === "air" && t.alt != null
+            ? t.alt * FT_TO_M
+            : 0;
+        if (onGround) seen.add(t.id);
         entries.push({
           id: t.id,
           kind: t.kind,
           lon: t.lon,
           lat: t.lat,
           height,
+          onGround,
+          grounded: cached != null,
           hdg: t.hdg,
           sog: t.sog,
           fixedAt: t.fixedAt,
           point: collection.add({
             id: t.id,
             position: Cesium.Cartesian3.fromDegrees(t.lon, t.lat, height),
-            pixelSize: t.emergency ? 5 : 2.6,
+            pixelSize: t.emergency ? 5 : onGround ? 2.2 : 2.6,
             disableDepthTestDistance: DOT_DEPTH_TEST_OFF_M,
             color: t.emergency
               ? Cesium.Color.fromCssColorString(OFFLINE_COLOR)
               : t.kind === "sea"
                 ? sea
-                : air,
+                : onGround
+                  ? ground
+                  : air,
           }),
         });
       }
+
+      // Aircraft that took off, or left the feed, stop paying for a cache slot.
+      for (const id of cache.keys()) if (!seen.has(id)) cache.delete(id);
     }
 
     entriesRef.current = entries;
@@ -735,18 +811,70 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
     if (ready) rebuild();
   }, [ready, rebuild]);
 
+  // ── settle surfaced aircraft onto the terrain ────────────
+  // Runs after the rebuild above, on the entries it just produced. Anything the
+  // batch does not reach is picked up on the next poll; anything the terrain
+  // cannot answer for stays on the ellipsoid, which is right at sea level and
+  // wrong by the field elevation everywhere else.
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    const Cesium = cesiumRef.current;
+    if (!ready || replay || !viewer || !Cesium || viewer.isDestroyed()) return;
+
+    const pending = entriesRef.current.filter((e) => e.onGround && !e.grounded);
+    if (pending.length === 0) return;
+
+    const batch = pending.slice(0, GROUND_SAMPLE_BATCH);
+    let cancelled = false;
+
+    void Cesium.sampleTerrainMostDetailed(
+      viewer.terrainProvider,
+      batch.map((e) => Cesium.Cartographic.fromDegrees(e.lon, e.lat)),
+    )
+      .then((sampled) => {
+        if (cancelled) return;
+        const cache = groundHeightRef.current;
+        const byId = new Map(entriesRef.current.map((e) => [e.id, e] as const));
+        for (let i = 0; i < batch.length; i++) {
+          const height = sampled[i]?.height;
+          if (height == null || !Number.isFinite(height)) continue;
+          cache.set(batch[i].id, height);
+          // The rebuild that produced `batch` may already have been replaced;
+          // the track's current entry is the one to move.
+          const entry = byId.get(batch[i].id);
+          if (!entry || !entry.onGround) continue;
+          entry.height = height;
+          entry.grounded = true;
+          entry.point.position = Cesium.Cartesian3.fromDegrees(
+            entry.lon, entry.lat, height,
+          );
+        }
+      })
+      .catch((e: unknown) => {
+        console.warn("[watch] terrain sample failed; on-ground tracks stay flat", e);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [ready, tracks, replay]);
+
   // ── layer visibility ─────────────────────────────────────
   useEffect(() => {
     layersRef.current = layers;
     layersDirtyRef.current = true;
   }, [layers]);
 
+  // Entering POV and moving the chase-angle slider both re-seat the camera; in
+  // between, whatever the operator has dragged or scrolled to is kept.
   useEffect(() => {
     povRef.current = pov;
+    povSeatRef.current = true;
   }, [pov]);
 
   useEffect(() => {
     tiltRef.current = tiltDeg;
+    povSeatRef.current = true;
   }, [tiltDeg]);
 
   // ── selection marker, label and trail ────────────────────
@@ -808,6 +936,10 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
     // POV runs every frame rather than at the projection rate — at 500 kt a
     // 200ms step is 50 m, which reads as the camera stuttering along behind the
     // aircraft. The entry it follows is refreshed by the projection pass below.
+    // Surfaced aircraft are drawn at the terrain height sampled below; the mesh
+    // needs its own position because it rides above the dot.
+    const groundScratch = new Cesium.Cartesian3();
+
     const povPosition = new Cesium.Cartesian3();
     const povOffset = new Cesium.Cartesian3();
     const povFrame = new Cesium.Matrix4();
@@ -869,12 +1001,12 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
 
         if (layersDirtyRef.current) {
           layersDirtyRef.current = false;
-          for (const entry of entries) entry.point.show = showing[entry.kind];
+          for (const entry of entries) entry.point.show = showing[layerOf(entry)];
           if (lanesRef.current) lanesRef.current.show = showing.lanes;
           if (gapsRef.current) gapsRef.current.show = showing.gaps;
           if (sensorPointsRef.current) sensorPointsRef.current.show = showing.cams;
           if (labelsRef.current) labelsRef.current.show = showing.labels;
-          if (!showing.air) {
+          if (!showing.air && !showing.ground) {
             for (const model of poolRef.current?.models ?? []) model.show = false;
           }
         }
@@ -883,7 +1015,10 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
 
         for (const entry of entries) {
           if (entry.id === selected) povEntry = entry;
-          if (live && entry.kind === "air" && entry.hdg != null && entry.sog) {
+          // A taxiing aircraft turns every few hundred metres, so dead reckoning
+          // it in a straight line would walk it off the apron and into a
+          // terminal. It stays on its last fix until the feed moves it.
+          if (live && entry.kind === "air" && !entry.onGround && entry.hdg != null && entry.sog) {
             const seconds = Math.min(MAX_PROJECT_SEC, (now - entry.fixedAt) / 1000);
             const [lon, lat] = project(entry.lon, entry.lat, entry.hdg, entry.sog, seconds);
             entry.point.position = Cesium.Cartesian3.fromDegrees(
@@ -898,7 +1033,8 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
         // Airframes for the aircraft nearest the middle of the view, dots for
         // everything else.
         const height = camera.positionCartographic.height;
-        const wantModels = live && showing.air && height < MODEL_CAMERA_HEIGHT_M;
+        const wantModels =
+          live && (showing.air || showing.ground) && height < MODEL_CAMERA_HEIGHT_M;
 
         if (wantModels) ensureModels();
         const owned = poolRef.current;
@@ -914,7 +1050,7 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
           const centre = camera.positionWC;
           const candidates: { entry: Entry; d: number }[] = [];
           for (const entry of entries) {
-            if (entry.kind !== "air") continue;
+            if (entry.kind !== "air" || !showing[layerOf(entry)]) continue;
             const d = Cesium.Cartesian3.distance(centre, entry.point.position);
             // Cheap frustum-ish reject: anything further than the camera is
             // from the horizon is not worth sorting.
@@ -930,8 +1066,19 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
             hpr.heading = Cesium.Math.toRadians(
               (entry.hdg ?? 0) + HEADING_OFFSET_DEG,
             );
+            // On the ground the dot marks the tarmac; the mesh has to ride above
+            // it on its gear rather than through it.
+            const at = entry.onGround
+              ? Cesium.Cartesian3.fromDegrees(
+                  entry.lon,
+                  entry.lat,
+                  entry.height + AIRFRAME_GROUND_CLEARANCE_M,
+                  undefined,
+                  groundScratch,
+                )
+              : entry.point.position;
             Cesium.Transforms.headingPitchRollToFixedFrame(
-              entry.point.position,
+              at,
               hpr,
               Cesium.Ellipsoid.WGS84,
               Cesium.Transforms.eastNorthUpToFixedFrame,
@@ -956,7 +1103,8 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
           // Anything that lost its airframe this tick goes back to being a dot.
           if (take < modelled || take < candidates.length) {
             for (let i = take; i < candidates.length; i++) {
-              candidates[i].entry.point.show = showing.air;
+              const { entry } = candidates[i];
+              entry.point.show = showing[layerOf(entry)];
             }
           }
           modelled = take;
@@ -971,7 +1119,7 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
         const entry = povEntry;
         const seconds = Math.min(MAX_PROJECT_SEC, (now - entry.fixedAt) / 1000);
         const [lon, lat] =
-          entry.kind === "air" && entry.hdg != null && entry.sog
+          entry.kind === "air" && !entry.onGround && entry.hdg != null && entry.sog
             ? project(entry.lon, entry.lat, entry.hdg, entry.sog, seconds)
             : [entry.lon, entry.lat];
 
@@ -985,13 +1133,38 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
           povFrame,
         );
 
-        const pitch = Cesium.Math.toRadians(
-          Math.min(POV_MAX_PITCH_DEG, Math.max(POV_MIN_PITCH_DEG, tiltRef.current)),
-        );
-        const range = entry.kind === "air" ? POV_RANGE_AIR_M : POV_RANGE_SEA_M;
-        povOffset.x = -range * Math.cos(pitch);
-        povOffset.y = 0;
-        povOffset.z = range * Math.sin(pitch);
+        if (povSeatRef.current) {
+          povSeatRef.current = false;
+          // Re-seat at the slider's angle, but keep the azimuth and distance the
+          // operator has orbited to — only the chase angle came from the slider.
+          let azimuth = Math.PI; // astern of the nose
+          let range = entry.kind === "air" ? POV_RANGE_AIR_M : POV_RANGE_SEA_M;
+          if (cameraLocked) {
+            const seated = camera.position;
+            const seatedRange = Cesium.Cartesian3.magnitude(seated);
+            if (seatedRange > POV_MIN_RANGE_M) {
+              azimuth = Math.atan2(seated.y, seated.x);
+              range = seatedRange;
+            }
+          }
+          const pitch = Cesium.Math.toRadians(
+            Math.min(POV_MAX_PITCH_DEG, Math.max(POV_MIN_PITCH_DEG, tiltRef.current)),
+          );
+          povOffset.x = range * Math.cos(pitch) * Math.cos(azimuth);
+          povOffset.y = range * Math.cos(pitch) * Math.sin(azimuth);
+          povOffset.z = range * Math.sin(pitch);
+        } else {
+          // Carry the camera's own position in the previous frame forward into
+          // this one. Cesium's controller has been moving it there all along —
+          // orbiting and zooming about the transform's origin — so drag and
+          // wheel work as normal while the aircraft keeps pulling the frame.
+          Cesium.Cartesian3.clone(camera.position, povOffset);
+          const range = Cesium.Cartesian3.magnitude(povOffset);
+          const clamped = Math.min(POV_MAX_RANGE_M, Math.max(POV_MIN_RANGE_M, range));
+          if (range > 0 && clamped !== range) {
+            Cesium.Cartesian3.multiplyByScalar(povOffset, clamped / range, povOffset);
+          }
+        }
         camera.lookAtTransform(povFrame, povOffset);
         cameraLocked = true;
       } else if (cameraLocked) {
@@ -1013,7 +1186,7 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
         );
         let inView = 0;
         for (const entry of entriesRef.current) {
-          if (!layersRef.current[entry.kind]) continue;
+          if (!layersRef.current[layerOf(entry)]) continue;
           const at = entry.point.position;
           // Over the horizon: on the far side of the globe, and drawn or not it
           // is not something the operator can see.

@@ -16,18 +16,47 @@ export type Track = {
   lat: number;
   /** Knots. */
   sog: number | null;
-  /** Degrees true, 0–360. */
+  /** Degrees true, 0-360. */
   hdg: number | null;
   /** Feet for air, metres of draught for sea. Null when unreported. */
   alt: number | null;
+  /** Air: pressure altitude, feet. */
+  baroAlt?: number | null;
+  /** Air: GNSS altitude, feet. What `alt` prefers. */
+  geoAlt?: number | null;
+  /** Air: climb rate, feet per minute; negative is descending. */
+  vrate?: number | null;
   /** ISO-3166 alpha-2 where the feed gives one, else null. */
   flag: string | null;
-  /** Aircraft type / vessel class, when reported. */
+  /** Country of registration, spelled out. */
+  country?: string | null;
+  /** Aircraft type / emitter category / vessel class, when reported. */
   cls: string | null;
+  /** Registration, where the feed carries one. */
+  reg?: string | null;
   /** Epoch ms of the position report itself, not of our poll. */
   fixedAt: number;
-  /** True while the aircraft is squawking 7500/7600/7700. */
+  /** Epoch ms of the last message of any kind, position or not. */
+  contactAt?: number;
+  /** Raw transponder code. */
+  squawk?: string | null;
+  /** Set while the aircraft is squawking 7500/7600/7700. */
   emergency?: string | null;
+  /** Ident / special position pulse. */
+  spi?: boolean;
+  /**
+   * Air only: the aircraft reports itself on the surface - taxiing, holding or
+   * parked. Its `alt` is meaningless there, so the globe puts it on the terrain.
+   */
+  onGround?: boolean;
+  /** How the position was derived: ADS-B, MLAT, ASTERIX, FLARM, TIS-B. */
+  posSource?: string | null;
+  /** Receiver ids that contributed the state vector, when the feed names them. */
+  sensors?: number[] | null;
+  /** Air: signal strength in dBFS, where the receiver reports it. */
+  rssi?: number | null;
+  /** Air: messages received from this aircraft in the current session. */
+  messages?: number | null;
   /** Set by the AIS adapter: minutes since the last position report. */
   gapMinutes?: number;
   /** Which adapter produced this. Surfaced in the HUD so nothing is implied. */

@@ -31,6 +31,7 @@ const WatchGlobe = dynamic(() => import("./WatchGlobe"), {
 
 const LAYER_ROWS: { id: LayerId; label: string; color: string }[] = [
   { id: "air", label: "AIR TRACKS", color: "#4FD1E0" },
+  { id: "ground", label: "ON GROUND", color: "#2E8794" },
   { id: "sea", label: "SURFACE", color: "#E8A33D" },
   { id: "lanes", label: "LANES", color: "#6E7F8C" },
   { id: "cams", label: "SENSORS", color: "#7BE38A" },
@@ -65,7 +66,7 @@ type Props = {
   replay: ReplayFrame | null;
   layers: Layers;
   onLayer: (id: LayerId) => void;
-  counts: { air: number; sea: number; cams: number };
+  counts: { air: number; ground: number; sea: number; cams: number };
   selected: Track | null;
   trail: [number, number][];
   stackId: MapStackId;
@@ -139,6 +140,7 @@ export default function GlobeStage({
             <span className="sw" />
             {row.label}
             {row.id === "air" && <b>{group(counts.air)}</b>}
+            {row.id === "ground" && <b>{group(counts.ground)}</b>}
             {row.id === "sea" && <b>{group(counts.sea)}</b>}
             {row.id === "cams" && <b>{counts.cams}</b>}
             {row.id === "buildings" && layers.buildings && (

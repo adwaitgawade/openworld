@@ -34,6 +34,7 @@ const DEFAULT_TILT = 90;
 
 const LIVE_LAYERS: Layers = {
   air: true,
+  ground: true,
   sea: true,
   lanes: false,
   cams: true,
@@ -44,6 +45,7 @@ const LIVE_LAYERS: Layers = {
 
 const COVERAGE_LAYERS: Layers = {
   air: false,
+  ground: false,
   sea: true,
   lanes: true,
   cams: true,
@@ -120,12 +122,14 @@ export default function WatchConsole() {
 
   const counts = useMemo(() => {
     let air = 0;
+    let ground = 0;
     let sea = 0;
     for (const track of tracks) {
       if (track.kind === "sea") sea++;
+      else if (track.onGround) ground++;
       else air++;
     }
-    return { air, sea, cams: SENSORS.length };
+    return { air, ground, sea, cams: SENSORS.length };
   }, [tracks]);
 
   // Tracks currently inside each sensor's stated range — the one live number on
@@ -330,7 +334,12 @@ export default function WatchConsole() {
 
   const copySelection = useCallback(() => {
     if (!selected) return;
-    const text = `${selected.name} ${selected.lat.toFixed(4)},${selected.lon.toFixed(4)} ${selected.sog ?? "?"}kt ${selected.source}`;
+    // The whole record, not a summary of it: whatever the feed reported is
+    // what lands on the clipboard.
+    const text = Object.entries(selected)
+      .filter(([, value]) => value != null && value !== "")
+      .map(([key, value]) => `${key}: ${Array.isArray(value) ? value.join(" ") : value}`)
+      .join("\n");
     void navigator.clipboard?.writeText(text).then(
       () => say("Selection copied"),
       () => say("Clipboard unavailable in this context"),
@@ -385,6 +394,7 @@ export default function WatchConsole() {
 
       const layerLabels: Record<LayerId, string> = {
         air: "air tracks",
+        ground: "aircraft on the ground",
         sea: "surface tracks",
         lanes: "sea lanes",
         cams: "sensor sites",

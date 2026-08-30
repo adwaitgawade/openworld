@@ -427,6 +427,9 @@
   text-overflow: ellipsis;
 }
 .whud .hh em {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   margin-left: auto;
   font-family: var(--mono);
   font-size: 9.5px;
@@ -434,9 +437,16 @@
   font-style: normal;
   flex: none;
 }
-.wkv { display: grid; grid-template-columns: 1fr 1fr; }
+.wkv {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  /* Twenty fields on an air track: cap the grid so the panel clears the
+     readout above it, and scroll the rest. */
+  max-height: min(42vh, 300px);
+  overflow-y: auto;
+}
 .wkv div {
-  padding: 6px 11px;
+  padding: 5px 11px;
   border-bottom: 1px solid var(--line);
   border-right: 1px solid var(--line);
   min-width: 0;
@@ -461,6 +471,15 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* flagcdn.com, sized by height so odd ratios (NP, CH) keep their shape. */
+.wflag {
+  display: inline-block;
+  width: 24px;
+  height: 18px;
+  margin-right: 6px;
+  vertical-align: -5px;
+}
+.whud .hh em .wflag { margin-right: 0; }
 .wacts { display: flex; gap: 6px; padding: 8px 10px; }
 .wbtn {
   flex: 1;

@@ -52,6 +52,20 @@ const PROVIDERS: Provider[] = [
   },
 ];
 
+/** readsb's `type` names the message that produced the position. */
+const SOURCE_LABEL: Record<string, string> = {
+  adsb_icao: "ADS-B",
+  adsb_icao_nt: "ADS-B",
+  adsb_other: "ADS-B",
+  adsr_icao: "ADS-R",
+  tisb_icao: "TIS-B",
+  tisb_other: "TIS-B",
+  tisb_trackfile: "TIS-B",
+  mlat: "MLAT",
+  mode_s: "MODE S",
+  adsc: "ADS-C",
+};
+
 const EMERGENCY_SQUAWK: Record<string, string> = {
   "7500": "UNLAWFUL INTERFERENCE",
   "7600": "RADIO FAILURE",
@@ -67,11 +81,19 @@ type Aircraft = {
   lon?: number;
   alt_baro?: number | "ground";
   alt_geom?: number;
+  baro_rate?: number;
+  geom_rate?: number;
   gs?: number;
   track?: number;
   squawk?: string;
   /** readsb reports "none" when there is nothing to report. */
   emergency?: string;
+  category?: string;
+  /** "adsb_icao", "mlat", "tisb_icao" and friends. */
+  type?: string;
+  rssi?: number;
+  messages?: number;
+  seen?: number;
   seen_pos?: number;
 };
 
@@ -94,8 +116,12 @@ function normalise(byHex: Map<string, Aircraft>, source: string): Track[] {
   const now = Date.now();
   const tracks: Track[] = [];
   for (const ac of byHex.values()) {
-    if (ac.alt_baro === "ground") continue;
-    const alt = ac.alt_geom ?? (typeof ac.alt_baro === "number" ? ac.alt_baro : null);
+    // readsb spells "on the surface" as the literal string "ground" in the
+    // barometric field; carry that through instead of dropping the aircraft.
+    const onGround = ac.alt_baro === "ground";
+    const alt = onGround
+      ? null
+      : (ac.alt_geom ?? (typeof ac.alt_baro === "number" ? ac.alt_baro : null));
     const emergency =
       ac.emergency && ac.emergency !== "none"
         ? ac.emergency.toUpperCase()
@@ -112,10 +138,21 @@ function normalise(byHex: Map<string, Aircraft>, source: string): Track[] {
       sog: ac.gs == null ? null : Math.round(ac.gs),
       hdg: ac.track ?? null,
       alt: alt == null ? null : Math.round(alt),
+      baroAlt: typeof ac.alt_baro === "number" ? ac.alt_baro : null,
+      geoAlt: ac.alt_geom ?? null,
+      vrate: ac.geom_rate ?? ac.baro_rate ?? null,
       flag: null,
-      cls: ac.t ?? null,
+      country: null,
+      cls: ac.t ?? (ac.category ? `CATEGORY ${ac.category}` : null),
+      reg: ac.r ?? null,
       fixedAt: now - (ac.seen_pos ?? 0) * 1000,
+      contactAt: now - (ac.seen ?? 0) * 1000,
+      squawk: ac.squawk ?? null,
       emergency,
+      onGround,
+      posSource: SOURCE_LABEL[ac.type ?? ""] ?? (ac.type ? ac.type.toUpperCase() : null),
+      rssi: ac.rssi ?? null,
+      messages: ac.messages ?? null,
       source,
     });
   }
