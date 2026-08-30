@@ -48,12 +48,11 @@ type Props = {
   sea: FeedHealth | null;
   airCount: number;
   seaCount: number;
-  sensorsOnline: string;
   onOpenPalette: () => void;
 };
 
 export default function TopBar({
-  view, onView, air, sea, airCount, seaCount, sensorsOnline, onOpenPalette,
+  view, onView, air, sea, airCount, seaCount, onOpenPalette,
 }: Props) {
   const latency = air?.latencySec ?? sea?.latencySec ?? null;
   const worst: FeedHealth["status"] =
@@ -85,7 +84,7 @@ export default function TopBar({
       </div>
 
       <button type="button" className="wsearch" onClick={onOpenPalette}>
-        <span>Search tracks, callsigns, hulls, sensors</span>
+        <span>Search tracks, callsigns, hulls</span>
         <span className="wkbd" style={{ marginLeft: "auto" }}>⌘K</span>
       </button>
 
@@ -106,13 +105,6 @@ export default function TopBar({
             {sea?.status === "down" && seaCount === 0
               ? "NO KEY"
               : seaCount.toLocaleString("en-US")}
-          </b>
-        </div>
-        <div className="whp" title="Sensor sites are simulated — no camera network is attached.">
-          <i>SENSORS</i>
-          <b>
-            <span className="wdot w" />
-            {sensorsOnline}
           </b>
         </div>
         <div className="whp">

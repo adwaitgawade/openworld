@@ -7,11 +7,10 @@ import dynamic from "next/dynamic";
  * nothing it can usefully render on the server.
  *
  * Its whole surface is a function of a clock and a live feed — the timeline's
- * unbuffered region, alert ages, the sensor bank's UTC stamps, the selection's
- * fix age. Every one of those reads a mount-time `Date.now()`, which the server
+ * unbuffered region, alert ages, the selection's fix age. Every one of those reads a mount-time `Date.now()`, which the server
  * and the browser answer differently, so prerendering it produced HTML that
  * could not match hydration (React reported the timeline's `nohist` width, but
- * the sensor timestamps had the same problem a second later). Above that sits
+ * the alert ages had the same problem a second later). Above that sits
  * Cesium, which touches `window` and WebGL at import time and is excluded from
  * SSR anyway.
  *

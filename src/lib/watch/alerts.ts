@@ -7,14 +7,14 @@
  */
 
 import { distanceNm, separationDeg } from "./geo";
-import { COVERAGE_GAPS, SENSORS } from "./stations";
+import { COVERAGE_GAPS, PLACES } from "./stations";
 import type { Alert, Severity, Track } from "./types";
 
 /** Beyond this, a vessel's last AIS fix counts as a gap rather than latency. */
 const AIS_GAP_MIN = 30;
 /** Under this speed over ground a vessel is not making way. */
 const LOITER_KT = 0.6;
-/** How close to a chokepoint sensor a loiter has to be to matter. */
+/** How close to a named chokepoint a loiter has to be to matter. */
 const CHOKEPOINT_NM = 45;
 /** Two hulls closer than this, both stopped, is a rendezvous. */
 const RENDEZVOUS_NM = 0.4;
@@ -67,16 +67,16 @@ export function deriveAlerts(tracks: Track[], now: number): Alert[] {
       continue;
     }
 
-    // 3. Loiter — stopped inside a chokepoint the sensor net watches.
+    // 3. Loiter — stopped inside one of the named chokepoints.
     if (t.kind === "sea" && t.sog != null && t.sog < LOITER_KT) {
-      const near = SENSORS.find(
-        (s) => distanceNm(s.lon, s.lat, t.lon, t.lat) < CHOKEPOINT_NM,
+      const near = PLACES.find(
+        (p) => distanceNm(p.lon, p.lat, t.lon, t.lat) < CHOKEPOINT_NM,
       );
       if (near) {
         push(
           2, "LOITER", `Not making way · SOG ${t.sog.toFixed(1)}kt`,
-          bearingLabel(t, near.lon, near.lat, near.place),
-          [near.id, t.flag ?? "FLAG UNKNOWN"], t.id, t.fixedAt,
+          bearingLabel(t, near.lon, near.lat, near.name),
+          [near.name, t.flag ?? "FLAG UNKNOWN"], t.id, t.fixedAt,
         );
       }
     }
@@ -111,16 +111,7 @@ export function deriveAlerts(tracks: Track[], now: number): Alert[] {
     }
   }
 
-  // 5. Sensor health — a site with no failover is a coverage problem, not a nuisance.
-  for (const s of SENSORS) {
-    if (!s.offline) continue;
-    push(
-      2, "SENSOR", `${s.id} offline`, `${s.place} · no failover`,
-      ["COVERAGE −8%", "SIMULATED SITE"], null, now,
-    );
-  }
-
-  // 6. Gap incursion — traffic inside a circle no sensor covers.
+  // 5. Gap incursion — traffic inside a circle nothing reports from.
   for (const gap of COVERAGE_GAPS) {
     const inside = tracks.filter(
       (t) => separationDeg(gap.lon, gap.lat, t.lon, t.lat) < gap.radiusDeg,
@@ -128,8 +119,8 @@ export function deriveAlerts(tracks: Track[], now: number): Alert[] {
     if (inside.length === 0) continue;
     push(
       3, "COVERAGE GAP", `${inside.length} track${inside.length === 1 ? "" : "s"} unobserved`,
-      `${gap.id} · ${gap.radiusDeg}° radius, no sensor in range`,
-      ["NO EO/IR", "TELEMETRY ONLY"], inside[0].id, now,
+      `${gap.id} · ${gap.radiusDeg}° radius, no reporting coverage`,
+      ["TELEMETRY ONLY"], inside[0].id, now,
     );
   }
 

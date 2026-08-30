@@ -1,34 +1,10 @@
 /**
  * Fixed geography the console draws regardless of what the live feeds say:
- * the sensor sites, the chokepoint labels, and the anchor points the keyless
- * ADS-B adapter fans out over.
- *
- * The sensor sites are notional — there is no camera network behind them — so
- * the UI labels the bank as a simulation. Their placement follows the maritime
- * chokepoints the live AIS traffic actually funnels through, which is what
- * makes the correlation between a sensor and a nearby track meaningful.
+ * the chokepoint labels, the circles nothing reports from, and the anchor
+ * points the keyless ADS-B adapter fans out over.
  */
 
-import type { CoverageGap, Sensor } from "./types";
-
-export const SENSORS: Sensor[] = [
-  { id: "CAM-01", place: "Gibraltar Strait", lon: -5.4, lat: 35.95, brg: 118 },
-  { id: "CAM-07", place: "Malacca Narrows", lon: 100.4, lat: 3.5, brg: 302 },
-  { id: "CAM-12", place: "Suez S. Approach", lon: 32.6, lat: 29.9, brg: 15 },
-  { id: "CAM-19", place: "Bab el Mandeb", lon: 43.4, lat: 12.6, brg: 244, offline: true },
-  { id: "CAM-23", place: "Hormuz Inbound", lon: 56.4, lat: 26.6, brg: 71 },
-  { id: "CAM-31", place: "Lagos Anchorage", lon: 3.4, lat: 6.4, brg: 190 },
-  { id: "CAM-38", place: "Dover TSS", lon: 1.4, lat: 51.1, brg: 40 },
-  { id: "CAM-44", place: "Panama Pacific", lon: -79.5, lat: 8.9, brg: 330 },
-];
-
-/** Unmanned sites: drawn on the globe, no camera feed in the bank. */
-export const SENSOR_SITES: [number, number][] = [
-  [129.0, 34.3], [121.0, 24.5], [18.4, -34.2], [106.0, -6.1], [9.9, 54.4],
-  [28.9, 41.1], [142.0, 45.0], [-70.0, -53.0], [55.3, 25.2], [-5.0, 49.5],
-  [103.9, 1.2], [36.8, -1.3], [-43.2, -23.0], [151.2, -33.9], [-118.2, 33.7],
-  [13.4, 45.5],
-];
+import type { CoverageGap } from "./types";
 
 export const COVERAGE_GAPS: CoverageGap[] = [
   { id: "GAP-PAC-C", lon: -140, lat: 8, radiusDeg: 22 },

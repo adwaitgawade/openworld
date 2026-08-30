@@ -8,7 +8,6 @@ export const ALERT_FILTERS = [
   "EMERGENCY SQUAWK",
   "LOITER",
   "RENDEZVOUS",
-  "SENSOR",
   "COVERAGE GAP",
 ] as const;
 

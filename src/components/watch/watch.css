@@ -26,7 +26,7 @@
   --sans: var(--font-geist-sans), system-ui, sans-serif;
 
   display: grid;
-  grid-template-rows: 46px 1fr 172px 48px;
+  grid-template-rows: 46px 1fr 48px;
   height: 100dvh;
   overflow: hidden;
   position: relative;
@@ -338,7 +338,7 @@
   display: flex;
   flex-direction: column;
   gap: 5px;
-  width: 186px;
+  width: 216px;
 }
 .wlgh {
   font-family: var(--mono);
@@ -367,6 +367,44 @@
 .wly.on { color: var(--txt); }
 .wly.on .sw { background: currentColor; border-color: currentColor; }
 .wly b { margin-left: auto; font-weight: 400; color: var(--faint); font-size: 10px; }
+.wlyx { border-top: 1px solid var(--line); padding-top: 5px; margin-top: 1px; }
+.wlyx b { font-size: 11px; }
+.wlyex {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding-left: 9px;
+  border-left: 1px solid var(--line);
+  margin-left: 4px;
+}
+.wlyrow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.wlyrow .wly { width: auto; flex: 1; min-width: 0; }
+.wlyi {
+  flex: none;
+  width: 14px;
+  height: 14px;
+  border: 1px solid #3a3930;
+  border-radius: 50%;
+  background: none;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 9px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+.wlyi:hover { color: var(--txt); border-color: #55534a; }
+.wlyi.on { color: var(--acc); border-color: var(--acc); }
+.wlyinfo {
+  flex-basis: 100%;
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  line-height: 1.5;
+  color: var(--dim);
+  border-left: 1px solid var(--acc);
+  padding: 4px 0 4px 7px;
+}
 .wreadout {
   top: 12px;
   right: 12px;
@@ -501,73 +539,6 @@
   font-weight: 600;
 }
 .wbtn.pri:hover { filter: brightness(1.12); color: #0b0a09; }
-
-/* ── sensor bank ─────────────────────────────────────────── */
-.wcams { display: flex; border-top: 1px solid var(--line); background: var(--panel); min-height: 0; }
-.wcsh {
-  width: 34px;
-  border-right: 1px solid var(--line);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex: none;
-}
-.wcsh span {
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 0.22em;
-  color: var(--faint);
-  writing-mode: vertical-rl;
-  transform: rotate(180deg);
-  white-space: nowrap;
-}
-.wcamrow { display: flex; flex: 1; min-width: 0; overflow: hidden; }
-.wcam {
-  position: relative;
-  border-right: 1px solid var(--line);
-  flex: 1;
-  min-width: 0;
-  cursor: pointer;
-  background: #070807;
-  padding: 0;
-  border-top: none;
-  border-bottom: none;
-  border-left: none;
-}
-.wcam canvas { display: block; width: 100%; height: 100%; }
-.wtop1,
-.wbot1 {
-  position: absolute;
-  left: 0;
-  right: 0;
-  display: flex;
-  gap: 8px;
-  padding: 5px 7px;
-  font-family: var(--mono);
-  font-size: 9px;
-  letter-spacing: 0.06em;
-  color: #b9c6c4;
-  text-shadow: 0 1px 3px #000;
-}
-.wtop1 { top: 0; z-index: 2; }
-.wbot1 { bottom: 0; z-index: 2; }
-.wtop1 b { color: #fff; font-weight: 500; }
-.wtop1 em { margin-left: auto; font-style: normal; color: var(--acc); }
-.wbot1 em { margin-left: auto; font-style: normal; }
-.wcam.sel { outline: 1px solid var(--acc); outline-offset: -1px; }
-.wcam .lost {
-  position: absolute;
-  inset: 0;
-  z-index: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-family: var(--mono);
-  font-size: 10px;
-  letter-spacing: 0.18em;
-  color: var(--mg);
-  background: repeating-linear-gradient(45deg, #0d0a0a, #0d0a0a 6px, #120c0d 6px, #120c0d 12px);
-}
 
 /* ── timeline ────────────────────────────────────────────── */
 .wtl {

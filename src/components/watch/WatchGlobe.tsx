@@ -11,8 +11,8 @@ import {
 import type { Viewer } from "cesium";
 
 import { circlePoints, project } from "@/lib/watch/geo";
-import { LANES } from "@/lib/watch/lanes";
-import { COVERAGE_GAPS, PLACES, SENSORS, SENSOR_SITES } from "@/lib/watch/stations";
+import { LANES, densifyLane } from "@/lib/watch/lanes";
+import { COVERAGE_GAPS, PLACES } from "@/lib/watch/stations";
 import type { Track } from "@/lib/watch/types";
 import {
   createImageryProviders,
@@ -36,7 +36,6 @@ export type LayerId =
   | "ground"
   | "sea"
   | "lanes"
-  | "cams"
   | "gaps"
   | "labels"
   | "buildings";
@@ -93,7 +92,7 @@ const AIR_COLOR = "#4FD1E0";
 const GROUND_COLOR = "#2E8794";
 const SEA_COLOR = "#E8A33D";
 const ACCENT = "#4FD1E0";
-const SENSOR_COLOR = "#7BE38A";
+const LANE_COLOR = "#6E7F8C";
 const OFFLINE_COLOR = "#E8577F";
 
 /** How far ahead of its last fix a track may be dead-reckoned. */
@@ -228,7 +227,6 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
   // Primitive collections, one per layer, so a toggle is a `.show` flip rather
   // than a rebuild.
   const pointsRef = useRef<import("cesium").PointPrimitiveCollection | null>(null);
-  const sensorPointsRef = useRef<import("cesium").PointPrimitiveCollection | null>(null);
   const lanesRef = useRef<import("cesium").PolylineCollection | null>(null);
   const gapsRef = useRef<import("cesium").PolylineCollection | null>(null);
   const trailRef = useRef<import("cesium").PolylineCollection | null>(null);
@@ -402,8 +400,6 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
 
       const points = scene.primitives.add(new Cesium.PointPrimitiveCollection());
       pointsRef.current = points;
-      const sensorPoints = scene.primitives.add(new Cesium.PointPrimitiveCollection());
-      sensorPointsRef.current = sensorPoints;
       const lanes = scene.primitives.add(new Cesium.PolylineCollection());
       lanesRef.current = lanes;
       const gaps = scene.primitives.add(new Cesium.PolylineCollection());
@@ -416,12 +412,17 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
       markerRef.current = markers;
 
       // ── static geography ───────────────────────────────────
+      // Solid and continuous: a dashed line over sparse waypoints read as a
+      // scatter of stray marks rather than a route. Densifying along the great
+      // circle keeps the stroke on the surface between waypoints, and a plain
+      // colour at low alpha stays legible over bright ocean imagery without
+      // competing with the track dots.
       for (const lane of LANES) {
         lanes.add({
-          positions: Cesium.Cartesian3.fromDegreesArray(lane.points.flat()),
-          width: 1,
+          positions: Cesium.Cartesian3.fromDegreesArray(densifyLane(lane.points).flat()),
+          width: 1.4,
           material: Cesium.Material.fromType("Color", {
-            color: Cesium.Color.fromCssColorString("#6E7F8C").withAlpha(0.3),
+            color: Cesium.Color.fromCssColorString(LANE_COLOR).withAlpha(0.55),
           }),
         });
       }
@@ -436,24 +437,6 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
             color: Cesium.Color.fromCssColorString(OFFLINE_COLOR).withAlpha(0.6),
             dashLength: 10,
           }),
-        });
-      }
-
-      const sites = [
-        ...SENSOR_SITES.map(([lon, lat]) => ({ lon, lat, offline: false })),
-        ...SENSORS,
-      ];
-      for (const site of sites) {
-        sensorPoints.add({
-          position: Cesium.Cartesian3.fromDegrees(site.lon, site.lat),
-          pixelSize: 5,
-          color: Cesium.Color.fromCssColorString(
-            site.offline ? OFFLINE_COLOR : SENSOR_COLOR,
-          ),
-          outlineColor: Cesium.Color.fromCssColorString(
-            site.offline ? OFFLINE_COLOR : SENSOR_COLOR,
-          ).withAlpha(0.35),
-          outlineWidth: 3,
         });
       }
 
@@ -472,17 +455,6 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
           ...labelStyle,
         });
       }
-      for (const sensor of SENSORS) {
-        labels.add({
-          position: Cesium.Cartesian3.fromDegrees(sensor.lon, sensor.lat),
-          text: sensor.id,
-          ...labelStyle,
-          fillColor: Cesium.Color.fromCssColorString(SENSOR_COLOR).withAlpha(0.8),
-          horizontalOrigin: Cesium.HorizontalOrigin.LEFT,
-          pixelOffset: new Cesium.Cartesian2(7, 3),
-        });
-      }
-
       viewer.camera.setView({
         destination: Cesium.Rectangle.fromDegrees(-80, -75, 100, 75),
       });
@@ -1004,7 +976,6 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
           for (const entry of entries) entry.point.show = showing[layerOf(entry)];
           if (lanesRef.current) lanesRef.current.show = showing.lanes;
           if (gapsRef.current) gapsRef.current.show = showing.gaps;
-          if (sensorPointsRef.current) sensorPointsRef.current.show = showing.cams;
           if (labelsRef.current) labelsRef.current.show = showing.labels;
           if (!showing.air && !showing.ground) {
             for (const model of poolRef.current?.models ?? []) model.show = false;
@@ -1070,12 +1041,12 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
             // it on its gear rather than through it.
             const at = entry.onGround
               ? Cesium.Cartesian3.fromDegrees(
-                  entry.lon,
-                  entry.lat,
-                  entry.height + AIRFRAME_GROUND_CLEARANCE_M,
-                  undefined,
-                  groundScratch,
-                )
+                entry.lon,
+                entry.lat,
+                entry.height + AIRFRAME_GROUND_CLEARANCE_M,
+                undefined,
+                groundScratch,
+              )
               : entry.point.position;
             Cesium.Transforms.headingPitchRollToFixedFrame(
               at,
@@ -1209,9 +1180,9 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
         const scaleMetres =
           a && b
             ? new Cesium.EllipsoidGeodesic(
-                Cesium.Cartographic.fromCartesian(a),
-                Cesium.Cartographic.fromCartesian(b),
-              ).surfaceDistance
+              Cesium.Cartographic.fromCartesian(a),
+              Cesium.Cartographic.fromCartesian(b),
+            ).surfaceDistance
             : 0;
 
         onStats({

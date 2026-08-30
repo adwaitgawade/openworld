@@ -20,7 +20,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "MERIDIAN — Watch",
   description:
-    "Global sensor-fusion watch floor: live ADS-B and AIS on a 3D earth.",
+    "Global track-fusion watch floor: live ADS-B and AIS on a 3D earth.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

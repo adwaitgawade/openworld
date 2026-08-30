@@ -10,22 +10,17 @@ import {
 } from "@/lib/buildings";
 import { fetchBuildingDetails, type BuildingDetails } from "@/lib/buildingDetails";
 import type { BuildingInfo } from "@/lib/buildingInfo";
-import { distanceNm } from "@/lib/watch/geo";
-import { SENSORS } from "@/lib/watch/stations";
-import type { Alert, Sensor, Track } from "@/lib/watch/types";
+import type { Alert, Track } from "@/lib/watch/types";
 
 import CommandPalette, { type Command } from "./CommandPalette";
 import GlobeStage from "./GlobeStage";
 import PriorityQueue, { type AlertFilter } from "./PriorityQueue";
-import SensorBank from "./SensorBank";
 import Timeline, { WINDOW_MS } from "./Timeline";
 import TopBar, { type ViewId } from "./TopBar";
 import { useFeed, type HistoryFrame } from "./useFeed";
 import type { GlobeStats, LayerId, Layers, ReplayFrame, WatchGlobeHandle } from "./WatchGlobe";
 import "./watch.css";
 
-/** How close a track has to be to count against a sensor's tile. */
-const SENSOR_RANGE_NM = 40;
 /** Below this the timeline head counts as live. */
 const LIVE_EPSILON_MS = 30_000;
 
@@ -37,7 +32,6 @@ const LIVE_LAYERS: Layers = {
   ground: true,
   sea: true,
   lanes: false,
-  cams: true,
   gaps: false,
   labels: false,
   buildings: false,
@@ -48,15 +42,10 @@ const COVERAGE_LAYERS: Layers = {
   ground: false,
   sea: true,
   lanes: true,
-  cams: true,
   gaps: true,
   labels: true,
   buildings: false,
 };
-
-function pad(n: number): string {
-  return String(n).padStart(2, "0");
-}
 
 export default function WatchConsole() {
   const { snapshot, history, since, error } = useFeed();
@@ -68,7 +57,6 @@ export default function WatchConsole() {
   const [filter, setFilter] = useState<AlertFilter>("ALL");
   const [selectedTrackId, setSelectedTrackId] = useState<string | null>(null);
   const [selectedAlertId, setSelectedAlertId] = useState<string | null>(null);
-  const [selectedSensorId, setSelectedSensorId] = useState<string | null>(null);
   const [cursor, setCursor] = useState<{ lon: number; lat: number } | null>(null);
   const [stats, setStats] = useState<GlobeStats>({
     inView: 0,
@@ -93,8 +81,8 @@ export default function WatchConsole() {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
-  // One shared second-resolution clock. Ages, the sensor timestamp and the
-  // timeline all read from it rather than each running their own interval.
+  // One shared second-resolution clock. Alert ages and the timeline both read
+  // from it rather than each running their own interval.
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 1000);
@@ -129,23 +117,7 @@ export default function WatchConsole() {
       else if (track.onGround) ground++;
       else air++;
     }
-    return { air, ground, sea, cams: SENSORS.length };
-  }, [tracks]);
-
-  // Tracks currently inside each sensor's stated range — the one live number on
-  // an otherwise simulated camera tile.
-  const inRange = useMemo(() => {
-    const out: Record<string, number> = {};
-    for (const sensor of SENSORS) {
-      let n = 0;
-      for (const track of tracks) {
-        // Cheap reject before the great-circle: one degree of latitude is 60nm.
-        if (Math.abs(track.lat - sensor.lat) > 1) continue;
-        if (distanceNm(sensor.lon, sensor.lat, track.lon, track.lat) < SENSOR_RANGE_NM) n++;
-      }
-      out[sensor.id] = n;
-    }
-    return out;
+    return { air, ground, sea };
   }, [tracks]);
 
   // ── replay ───────────────────────────────────────────────
@@ -247,20 +219,6 @@ export default function WatchConsole() {
     [byId, flyToTrack, say],
   );
 
-  const selectSensor = useCallback(
-    (sensor: Sensor) => {
-      setSelectedSensorId(sensor.id);
-      globeRef.current?.flyTo(sensor.lon, sensor.lat, 700_000);
-      const n = inRange[sensor.id] ?? 0;
-      say(
-        sensor.offline
-          ? `${sensor.id} · ${sensor.place} — site offline`
-          : `${sensor.id} · ${sensor.place} — ${n} live track${n === 1 ? "" : "s"} within ${SENSOR_RANGE_NM}nm`,
-      );
-    },
-    [inRange, say],
-  );
-
   const toggleLayer = useCallback((id: LayerId) => {
     setLayers((previous) => ({ ...previous, [id]: !previous[id] }));
   }, []);
@@ -312,7 +270,7 @@ export default function WatchConsole() {
       setCoverage(next === "coverage");
       if (next === "coverage") {
         setLayers(COVERAGE_LAYERS);
-        say("Coverage view — sensor sites, lanes and the circles nothing watches");
+        say("Coverage view — lanes and the circles nothing reports from");
       } else {
         setLayers(LIVE_LAYERS);
         if (next === "live") {
@@ -384,20 +342,11 @@ export default function WatchConsole() {
         }
       }
 
-      for (const sensor of SENSORS) {
-        commands.push({
-          scope: "JUMP",
-          label: `Sensor — ${sensor.id} ${sensor.place}`,
-          run: () => selectSensor(sensor),
-        });
-      }
-
       const layerLabels: Record<LayerId, string> = {
         air: "air tracks",
         ground: "aircraft on the ground",
         sea: "surface tracks",
         lanes: "sea lanes",
-        cams: "sensor sites",
         gaps: "coverage gaps",
         buildings: "3D buildings",
         labels: "place labels",
@@ -494,7 +443,7 @@ export default function WatchConsole() {
       ];
     },
     [
-      tracks, layers, stackId, selected, selectTrack, selectSensor,
+      tracks, layers, stackId, selected, selectTrack,
       toggleLayer, applyView, flyToTrack, copySelection, applyTilt,
       buildingStyleId, povActive, togglePov,
     ],
@@ -530,7 +479,6 @@ export default function WatchConsole() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const utc = `${pad(new Date(now).getUTCHours())}:${pad(new Date(now).getUTCMinutes())}:${pad(new Date(now).getUTCSeconds())}`;
   const unresolved = shownAlerts.filter((a) => a.sev <= 2).length;
 
   return (
@@ -542,7 +490,6 @@ export default function WatchConsole() {
         sea={snapshot?.health.sea ?? null}
         airCount={counts.air}
         seaCount={counts.sea}
-        sensorsOnline={`${SENSORS.filter((s) => !s.offline).length}/${SENSORS.length}`}
         onOpenPalette={() => setPaletteOpen(true)}
       />
 
@@ -591,13 +538,6 @@ export default function WatchConsole() {
           onCopy={copySelection}
         />
       </div>
-
-      <SensorBank
-        selectedId={selectedSensorId}
-        onSelect={selectSensor}
-        inRange={inRange}
-        utc={utc}
-      />
 
       <Timeline
         offsetMs={offsetMs}

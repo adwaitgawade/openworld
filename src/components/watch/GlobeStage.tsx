@@ -1,6 +1,7 @@
 "use client";
 
 import dynamic from "next/dynamic";
+import { useState } from "react";
 import type { Ref } from "react";
 
 import type { MapStackId } from "@/lib/mapStacks";
@@ -29,15 +30,42 @@ const WatchGlobe = dynamic(() => import("./WatchGlobe"), {
   ),
 });
 
-const LAYER_ROWS: { id: LayerId; label: string; color: string }[] = [
+type LayerRow = { id: LayerId; label: string; color: string };
+
+const LAYER_ROWS: LayerRow[] = [
   { id: "air", label: "AIR TRACKS", color: "#4FD1E0" },
   { id: "ground", label: "ON GROUND", color: "#2E8794" },
   { id: "sea", label: "SURFACE", color: "#E8A33D" },
-  { id: "lanes", label: "LANES", color: "#6E7F8C" },
-  { id: "cams", label: "SENSORS", color: "#7BE38A" },
-  { id: "gaps", label: "COVERAGE GAPS", color: "#E8577F" },
   { id: "buildings", label: "3D BUILDINGS", color: "#D8D6CE" },
-  { id: "labels", label: "PLACE LABELS", color: "#8A877C" },
+];
+
+/**
+ * Reference geometry rather than feed data, so it sits behind a disclosure
+ * instead of on the main list. Each row carries the caveat its geometry needs:
+ * these are hand-placed approximations, not something the feeds produce.
+ */
+const EXTRA_LAYER_ROWS: (LayerRow & { info: string })[] = [
+  {
+    id: "lanes",
+    label: "LANES",
+    color: "#6E7F8C",
+    info:
+      "Twelve hand-drawn polylines tracing the approximate centrelines of the world's busiest commercial shipping routes — Asia–Europe via Suez, Transpacific North, Cape Route, Panama–Asia and so on. Pure reference geometry: nothing reads them for alerts or track logic. They are here so a scatter of AIS hulls reads as traffic on a route rather than random dots.",
+  },
+  {
+    id: "labels",
+    label: "PLACE LABELS",
+    color: "#8A877C",
+    info:
+      "Nine chokepoint names — Gibraltar, Suez, Hormuz, Malacca, Panama, Dover, Bab el Mandeb, Taiwan Strait and the Cape — pinned at fixed coordinates. Like the lanes, they are static captions rather than anything the feeds report, and the loiter alert measures against these same points.",
+  },
+  {
+    id: "gaps",
+    label: "COVERAGE GAPS",
+    color: "#E8577F",
+    info:
+      "Five dashed circles over the central Pacific, south Atlantic, south Indian Ocean, southwest Pacific and Labrador Sea — regions with no reporting coverage. ADS-B and AIS are receiver-based, so mid-ocean traffic genuinely goes dark, and these say so rather than letting the map imply uniform global coverage. A track inside one raises a P3 COVERAGE GAP alert. The circles themselves are hand-placed approximations, not derived from the feeds.",
+  },
 ];
 
 /** Degrees below horizontal, matching the explorer globe's three presets. */
@@ -66,7 +94,7 @@ type Props = {
   replay: ReplayFrame | null;
   layers: Layers;
   onLayer: (id: LayerId) => void;
-  counts: { air: number; ground: number; sea: number; cams: number };
+  counts: { air: number; ground: number; sea: number };
   selected: Track | null;
   trail: [number, number][];
   stackId: MapStackId;
@@ -105,6 +133,26 @@ export default function GlobeStage({
 }: Props) {
   const total = tracks.length;
 
+  // Reference geometry lives behind a disclosure. The coverage view turns both
+  // layers on by preset, so the section opens itself rather than leaving the
+  // user looking at lines with no control for them.
+  const [opened, setOpened] = useState(false);
+  const [info, setInfo] = useState<LayerId | null>(null);
+  // Either the user opened it, or a preset (the coverage view) switched one of
+  // these layers on — in which case the section has to be open to own its
+  // control.
+  const extrasOpen = opened || EXTRA_LAYER_ROWS.some((row) => layers[row.id]);
+
+  // Collapsing hides the geometry too: an unreachable layer left drawn on the
+  // globe is the confusing case.
+  const toggleExtras = () => {
+    if (extrasOpen) {
+      setInfo(null);
+      for (const row of EXTRA_LAYER_ROWS) if (layers[row.id]) onLayer(row.id);
+    }
+    setOpened(!extrasOpen);
+  };
+
   return (
     <div className="wstage">
       <WatchGlobe
@@ -142,12 +190,50 @@ export default function GlobeStage({
             {row.id === "air" && <b>{group(counts.air)}</b>}
             {row.id === "ground" && <b>{group(counts.ground)}</b>}
             {row.id === "sea" && <b>{group(counts.sea)}</b>}
-            {row.id === "cams" && <b>{counts.cams}</b>}
             {row.id === "buildings" && layers.buildings && (
               <b>{buildingsStatus === "loading" ? "…" : buildingsStatus === "error" ? "ERR" : "ON"}</b>
             )}
           </button>
         ))}
+
+        <button
+          type="button"
+          className={`wly wlyx${extrasOpen ? " on" : ""}`}
+          aria-expanded={extrasOpen}
+          onClick={toggleExtras}
+        >
+          <span className="sw" />
+          EXTRA OPTIONS
+          <b>{extrasOpen ? "−" : "+"}</b>
+        </button>
+
+        {extrasOpen && (
+          <div className="wlyex">
+            {EXTRA_LAYER_ROWS.map((row) => (
+              <div key={row.id} className="wlyrow">
+                <button
+                  type="button"
+                  className={`wly${layers[row.id] ? " on" : ""}`}
+                  style={{ color: layers[row.id] ? row.color : undefined }}
+                  onClick={() => onLayer(row.id)}
+                >
+                  <span className="sw" />
+                  {row.label}
+                </button>
+                <button
+                  type="button"
+                  className={`wlyi${info === row.id ? " on" : ""}`}
+                  aria-label={`What ${row.label.toLowerCase()} are`}
+                  aria-expanded={info === row.id}
+                  onClick={() => setInfo((previous) => (previous === row.id ? null : row.id))}
+                >
+                  i
+                </button>
+                {info === row.id && <p className="wlyinfo">{row.info}</p>}
+              </div>
+            ))}
+          </div>
+        )}
       </div>
 
       <div className="wov wreadout">

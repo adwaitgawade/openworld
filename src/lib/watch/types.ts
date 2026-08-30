@@ -79,16 +79,6 @@ export type Alert = {
   raisedAt: number;
 };
 
-export type Sensor = {
-  id: string;
-  place: string;
-  lon: number;
-  lat: number;
-  /** Bearing the camera looks along, degrees true. */
-  brg: number;
-  offline?: boolean;
-};
-
 /** Dashed circles on the globe: a centre and a radius in degrees of arc. */
 export type CoverageGap = {
   id: string;
