@@ -22,6 +22,8 @@
  * fields actually come from.
  */
 
+import { rememberAirport } from "./airports";
+
 const BASE = "https://api.adsbdb.com/v0/aircraft";
 /** A published route does not change during a session. */
 const HIT_TTL_MS = 6 * 60 * 60_000;
@@ -229,6 +231,22 @@ function toRoute(
   const destination = toAirport(flightroute.destination);
   // Half a route is not a route: the HUD draws an arrow between two ends.
   if (!origin || !destination) return null;
+
+  // Both ends go into the airport index, so the palette can later find them by
+  // the IATA code a passenger would recognise — adsb.lol's airport endpoint
+  // only answers to ICAO.
+  for (const end of [origin, destination]) {
+    rememberAirport({
+      icao: end.icao,
+      iata: end.iata,
+      name: end.name,
+      location: end.municipality,
+      countryIso: end.countryIso,
+      lat: end.lat,
+      lon: end.lon,
+      elevationFt: end.elevationFt,
+    });
+  }
 
   const airline = flightroute.airline;
   return {

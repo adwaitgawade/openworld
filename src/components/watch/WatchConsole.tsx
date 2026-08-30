@@ -20,6 +20,7 @@ import TopBar from "./TopBar";
 import { useFeed } from "./useFeed";
 import { useLiveTrack } from "./useLiveTrack";
 import { useAircraftDetail } from "./useAircraftDetail";
+import { useAirportSearch } from "./useAirportSearch";
 import type {
   GlobeStats,
   LayerId,
@@ -86,6 +87,7 @@ export default function WatchConsole() {
   const [buildingDetails, setBuildingDetails] = useState<BuildingDetails | null>(null);
   const [buildingDetailsError, setBuildingDetailsError] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteQuery, setPaletteQuery] = useState("");
   const [queueOpen, setQueueOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -191,6 +193,10 @@ export default function WatchConsole() {
     if (selected.reg && name === selected.reg.trim().toUpperCase()) return null;
     return name;
   }, [selected]);
+
+  // Airport codes typed into the palette are resolved over the network, so the
+  // hit arrives separately from the synchronous command list.
+  const airportHit = useAirportSearch(paletteQuery);
 
   const aircraftDetail = useAircraftDetail(
     selected?.kind === "air" ? selected.id : null,
@@ -485,14 +491,30 @@ export default function WatchConsole() {
         );
       }
 
+      // Like track hits, the airport was matched by the lookup rather than by
+      // the label filter — "EGLL" does not appear in "London Heathrow Airport".
+      const airportHits: Command[] = [];
+      if (airportHit && q) {
+        const where = [airportHit.location, airportHit.countryIso]
+          .filter(Boolean)
+          .join(", ");
+        airportHits.push({
+          scope: "AIRPORT",
+          label: `${airportHit.icao}${airportHit.iata ? ` · ${airportHit.iata}` : ""} · ${airportHit.name}${where ? ` — ${where}` : ""}`,
+          keys: airportHit.countryIso ?? "",
+          run: () => flyToAirport(airportHit.lon, airportHit.lat),
+        });
+      }
+
       if (!q) return commands;
       return [
+        ...airportHits,
         ...trackHits,
         ...commands.filter((c) => `${c.scope} ${c.label}`.toLowerCase().includes(q)),
       ];
     },
     [
-      tracks, layers, stackId, selected, selectTrack,
+      tracks, layers, stackId, selected, selectTrack, airportHit, flyToAirport,
       toggleLayer, flyToTrack, copySelection, applyTilt,
       buildingStyleId, povActive, togglePov,
     ],
@@ -594,7 +616,14 @@ export default function WatchConsole() {
       </div>
 
       {paletteOpen && (
-        <CommandPalette onClose={() => setPaletteOpen(false)} commands={buildCommands} />
+        <CommandPalette
+          onClose={() => {
+            setPaletteOpen(false);
+            setPaletteQuery("");
+          }}
+          commands={buildCommands}
+          onQuery={setPaletteQuery}
+        />
       )}
 
       <div className={`wtoast${toast || error ? " on" : ""}`}>

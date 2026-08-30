@@ -14,13 +14,19 @@ type Props = {
   onClose: () => void;
   /** Called with the current query so track search can match live data. */
   commands: (query: string) => Command[];
+  /**
+   * Reports the query as it is typed, for results that have to be fetched —
+   * an airport code is resolved over the network, so it cannot come back from
+   * the synchronous `commands` call.
+   */
+  onQuery?: (query: string) => void;
 };
 
 /**
  * Mounted only while open, so each opening starts with an empty query and the
  * cursor at the top without an effect having to reset anything.
  */
-export default function CommandPalette({ onClose, commands }: Props) {
+export default function CommandPalette({ onClose, commands, onQuery }: Props) {
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -56,10 +62,13 @@ export default function CommandPalette({ onClose, commands }: Props) {
           ref={inputRef}
           type="text"
           value={query}
-          placeholder="Run a command or jump to a track…"
+          placeholder="Run a command, or jump to a track or airport…"
           onChange={(e) => {
             setQuery(e.target.value);
             setCursor(0);
+            // Reported from the event rather than an effect: the parent turns
+            // this into a fetch, and an effect would make that a render cascade.
+            onQuery?.(e.target.value);
           }}
           onKeyDown={(e) => {
             if (e.key === "ArrowDown") {
