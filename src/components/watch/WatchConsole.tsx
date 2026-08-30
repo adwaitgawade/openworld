@@ -10,6 +10,7 @@ import {
 } from "@/lib/buildings";
 import { fetchBuildingDetails, type BuildingDetails } from "@/lib/buildingDetails";
 import type { BuildingInfo } from "@/lib/buildingInfo";
+import { project } from "@/lib/watch/geo";
 import type { Alert, Track } from "@/lib/watch/types";
 
 import CommandPalette, { type Command } from "./CommandPalette";
@@ -29,6 +30,19 @@ import "./watch.css";
 
 /** Degrees below horizontal the camera starts at: straight down. */
 const DEFAULT_TILT = 90;
+
+/** Matches the globe's own dead-reckoning cap, so dot and split agree. */
+const MAX_PROJECT_SEC = 900;
+/**
+ * Decimal places the split position is rounded to before it reaches the globe.
+ * Two is a little over a kilometre, so the arc is rebuilt when the aircraft has
+ * covered real ground rather than on every tick of the clock — the geometry is
+ * ground-clamped and not free to regenerate.
+ */
+const SPLIT_PRECISION = 2;
+
+/** Feeds report altitude in feet; Cesium wants metres. */
+const FT_TO_M = 0.3048;
 
 /** What the console opens with; every one of these is a toggle in the panel. */
 const DEFAULT_LAYERS: Layers = {
@@ -151,20 +165,68 @@ export default function WatchConsole() {
     routeCallsign,
   );
 
+  /**
+   * Where the route is split into flown and remaining.
+   *
+   * The aircraft's own fix is the wrong answer: the air feed is cached for a
+   * minute server-side, while the globe dead-reckons the dot forward every
+   * frame, so a split drawn at the last fix falls a minute behind the aircraft
+   * sitting on top of it. This projects the same way the globe does.
+   *
+   * Returned as a rounded string so it is a stable value, not a fresh object
+   * every second — the route is only rebuilt once it names a different place.
+   * Altitude rides along, since the leg is drawn up to the aircraft.
+   */
+  const splitKey = useMemo(() => {
+    if (!selected || selected.kind !== "air") return null;
+
+    // A taxiing aircraft turns too often to dead-reckon, and the globe leaves
+    // it on its last fix for the same reason.
+    const projected =
+      !selected.onGround && selected.hdg != null && selected.sog
+        ? project(
+          selected.lon,
+          selected.lat,
+          selected.hdg,
+          selected.sog,
+          Math.min(MAX_PROJECT_SEC, Math.max(0, (now - selected.fixedAt) / 1000)),
+        )
+        : [selected.lon, selected.lat];
+
+    // Feet off the transponder, metres for the globe; rounded to 50 m so a
+    // shallow climb does not redraw the arc on its own.
+    const metres = selected.onGround || selected.alt == null ? 0 : selected.alt * FT_TO_M;
+    const height = Math.round(metres / 50) * 50;
+
+    return [
+      projected[0].toFixed(SPLIT_PRECISION),
+      projected[1].toFixed(SPLIT_PRECISION),
+      height,
+    ].join("|");
+  }, [selected, now]);
+
   /** The route as the globe wants it: two endpoints and where the flight is. */
   const routeGeometry = useMemo<RouteGeometry | null>(() => {
     const route = aircraftDetail.route;
-    if (!route || !selected || selected.kind !== "air") return null;
+    if (!route || !splitKey) return null;
+
+    const [lon, lat, height] = splitKey.split("|").map(Number);
     return {
-      origin: { lon: route.origin.lon, lat: route.origin.lat, code: route.origin.iata ?? route.origin.icao },
+      origin: {
+        lon: route.origin.lon,
+        lat: route.origin.lat,
+        code: route.origin.iata ?? route.origin.icao,
+        height: (route.origin.elevationFt ?? 0) * FT_TO_M,
+      },
       destination: {
         lon: route.destination.lon,
         lat: route.destination.lat,
         code: route.destination.iata ?? route.destination.icao,
+        height: (route.destination.elevationFt ?? 0) * FT_TO_M,
       },
-      at: { lon: selected.lon, lat: selected.lat },
+      at: { lon, lat, height },
     };
-  }, [aircraftDetail.route, selected]);
+  }, [aircraftDetail.route, splitKey]);
 
   const flyToAirport = useCallback((lon: number, lat: number) => {
     globeRef.current?.flyToAirport(lon, lat);

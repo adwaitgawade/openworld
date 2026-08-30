@@ -59,9 +59,11 @@ export type GlobeStats = {
  * arc drawn as remaining rather than guessing where it got to.
  */
 export type RouteGeometry = {
-  origin: { lon: number; lat: number; code: string };
-  destination: { lon: number; lat: number; code: string };
-  at: { lon: number; lat: number } | null;
+  /** Airport ends, at field elevation in metres. */
+  origin: { lon: number; lat: number; code: string; height: number };
+  destination: { lon: number; lat: number; code: string; height: number };
+  /** The aircraft, at its reported altitude in metres. */
+  at: { lon: number; lat: number; height: number } | null;
 };
 
 export type WatchGlobeHandle = {
@@ -961,111 +963,94 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
   // Drawn from the airport records, not from the track: this is where the
   // flight is booked to go, so it stays put while the aircraft moves along it.
   //
-  // Clamped to the ground rather than drawn as ordinary polylines. A line on
-  // the ellipsoid is depth-tested against the globe, so it sinks under terrain
-  // at an oblique angle and z-fights at low altitude — exactly when an operator
-  // is looking closely. A ground primitive is painted onto the surface itself
-  // and stays legible at every zoom and camera angle.
+  // Flown at altitude rather than painted on the ground, so the line meets the
+  // aircraft where it actually is. Each leg ramps between the heights of its
+  // ends — field elevation at an airport, reported altitude at the aircraft —
+  // which puts the join under the dot instead of on the terrain beneath it.
   useEffect(() => {
-    const viewer = viewerRef.current;
     const Cesium = cesiumRef.current;
-    const fallback = routeRef.current;
+    const lines = routeRef.current;
     const points = routePointsRef.current;
     const labels = routeLabelsRef.current;
-    if (!ready || !Cesium || !viewer || viewer.isDestroyed() || !fallback) return;
-    if (!points || !labels) return;
+    if (!ready || !Cesium || !lines || !points || !labels) return;
 
-    const { scene } = viewer;
-    const drawn: import("cesium").GroundPolylinePrimitive[] = [];
-
-    fallback.removeAll();
+    lines.removeAll();
     points.removeAll();
     labels.removeAll();
+    if (!route) return;
 
-    if (route) {
-      const { origin, destination, at } = route;
-      const flown = Cesium.Color.fromCssColorString(ROUTE_FLOWN_COLOR);
-      const remaining = Cesium.Color.fromCssColorString(ROUTE_REMAINING_COLOR);
+    const { origin, destination, at } = route;
+    const flown = Cesium.Color.fromCssColorString(ROUTE_FLOWN_COLOR);
+    const remaining = Cesium.Color.fromCssColorString(ROUTE_REMAINING_COLOR);
 
-      const from: [number, number] = [origin.lon, origin.lat];
-      const to: [number, number] = [destination.lon, destination.lat];
-      const here: [number, number] | null = at ? [at.lon, at.lat] : null;
-
-      // Terrain-clamped lines need the depth texture; without it (a software
-      // renderer, or a context that lost the extension) the flat polylines are
-      // still better than nothing.
-      const clamped = Cesium.GroundPolylinePrimitive.isSupported(scene);
-
-      const leg = (
-        a: [number, number],
-        b: [number, number],
-        colour: import("cesium").Color,
-        width: number,
-      ) => {
-        if (clamped) {
-          // GroundPolylineGeometry follows the geodesic itself, so the two
-          // endpoints are all it needs.
-          const primitive = new Cesium.GroundPolylinePrimitive({
-            geometryInstances: new Cesium.GeometryInstance({
-              geometry: new Cesium.GroundPolylineGeometry({
-                positions: Cesium.Cartesian3.fromDegreesArray([...a, ...b]),
-                width,
-              }),
-              attributes: {
-                color: Cesium.ColorGeometryInstanceAttribute.fromColor(colour),
-              },
-            }),
-            appearance: new Cesium.PolylineColorAppearance(),
-          });
-          scene.groundPrimitives.add(primitive);
-          drawn.push(primitive);
-          return;
-        }
-
-        // Chords cut under the surface over a leg this long, so the fallback
-        // subdivides along the great circle — as the sea lanes do.
-        fallback.add({
-          positions: Cesium.Cartesian3.fromDegreesArray(densifyLane([a, b], 1).flat()),
-          width,
-          material: Cesium.Material.fromType("Color", { color: colour }),
-        });
-      };
-
-      // With no fix to split on, the whole route is still to fly.
-      if (here) leg(from, here, flown, 3);
-      leg(here ?? from, to, remaining, here ? 2.5 : 3);
-
-      for (const [end, colour] of [
-        [origin, flown],
-        [destination, remaining],
-      ] as const) {
-        points.add({
-          position: Cesium.Cartesian3.fromDegrees(end.lon, end.lat),
-          pixelSize: 5,
-          color: colour.withAlpha(0.95),
-          outlineColor: Cesium.Color.fromCssColorString("#0B0A09").withAlpha(0.8),
-          outlineWidth: 1,
-          disableDepthTestDistance: Number.POSITIVE_INFINITY,
-        });
-        labels.add({
-          position: Cesium.Cartesian3.fromDegrees(end.lon, end.lat),
-          text: end.code,
-          font: "10px ui-monospace, monospace",
-          fillColor: colour,
-          horizontalOrigin: Cesium.HorizontalOrigin.CENTER,
-          verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
-          pixelOffset: new Cesium.Cartesian2(0, -9),
-          disableDepthTestDistance: Number.POSITIVE_INFINITY,
-        });
+    /**
+     * One leg, as a great circle climbing or descending between its ends.
+     *
+     * A polyline is drawn as straight chords between the positions it is
+     * handed, so the leg is subdivided the way the sea lanes are; height is
+     * interpolated across the same vertices, which is what keeps a long leg
+     * from cutting through the globe on its way up.
+     */
+    const leg = (
+      a: [number, number],
+      heightA: number,
+      b: [number, number],
+      heightB: number,
+    ): import("cesium").Cartesian3[] => {
+      const points2d = densifyLane([a, b], 1);
+      const last = Math.max(1, points2d.length - 1);
+      const coordinates: number[] = [];
+      for (let i = 0; i < points2d.length; i++) {
+        const t = i / last;
+        coordinates.push(points2d[i][0], points2d[i][1], heightA + (heightB - heightA) * t);
       }
+      return Cesium.Cartesian3.fromDegreesArrayHeights(coordinates);
+    };
+
+    const from: [number, number] = [origin.lon, origin.lat];
+    const to: [number, number] = [destination.lon, destination.lat];
+    const here: [number, number] | null = at ? [at.lon, at.lat] : null;
+
+    if (here && at) {
+      lines.add({
+        positions: leg(from, origin.height, here, at.height),
+        width: 2.5,
+        material: Cesium.Material.fromType("Color", { color: flown }),
+      });
     }
 
-    // Ground primitives are owned individually rather than by a collection, so
-    // they are removed here instead of at the top of the next run.
-    return () => {
-      if (viewer.isDestroyed()) return;
-      for (const primitive of drawn) scene.groundPrimitives.remove(primitive);
-    };
+    // With no fix to split on, the whole route is still to fly.
+    lines.add({
+      positions: here && at
+        ? leg(here, at.height, to, destination.height)
+        : leg(from, origin.height, to, destination.height),
+      width: 2.5,
+      material: Cesium.Material.fromType("Color", { color: remaining }),
+    });
+
+    for (const [end, colour] of [
+      [origin, flown],
+      [destination, remaining],
+    ] as const) {
+      points.add({
+        position: Cesium.Cartesian3.fromDegrees(end.lon, end.lat, end.height),
+        pixelSize: 5,
+        color: colour.withAlpha(0.95),
+        outlineColor: Cesium.Color.fromCssColorString("#0B0A09").withAlpha(0.8),
+        outlineWidth: 1,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
+      });
+      labels.add({
+        position: Cesium.Cartesian3.fromDegrees(end.lon, end.lat, end.height),
+        text: end.code,
+        font: "10px ui-monospace, monospace",
+        fillColor: colour,
+        horizontalOrigin: Cesium.HorizontalOrigin.CENTER,
+        verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+        pixelOffset: new Cesium.Cartesian2(0, -9),
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
+      });
+    }
   }, [ready, route]);
 
   // ── the render loop: dead reckoning, airframes, readouts ─
