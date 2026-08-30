@@ -343,16 +343,32 @@ export default function WatchConsole() {
       const q = query.trim().toLowerCase();
       const commands: Command[] = [];
 
+      // Track hits are kept apart from the rest: they have already been matched
+      // against the query, and the label filter at the bottom would drop them
+      // again. An MMSI search is exactly that case — the hull's identifier is
+      // what matched, and the label need not repeat it.
+      const trackHits: Command[] = [];
       if (q.length >= 2) {
+        // A vessel's id is its MMSI, an aircraft's its ICAO24, and a search may
+        // spell either with the label in front of it, as the feeds print them.
+        const bare = q.replace(/^(mmsi|imo|icao|icao24|hex)[\s:]*/, "");
         const hits = tracks
           .filter(
-            (t) => t.name.toLowerCase().includes(q) || t.id.toLowerCase().includes(q),
+            (t) =>
+              t.name.toLowerCase().includes(q) || t.id.toLowerCase().includes(bare),
           )
           .slice(0, 8);
         for (const track of hits) {
-          commands.push({
+          const sea = track.kind === "sea";
+          // The identifier earns its place in the row when it is not already
+          // the name — an unnamed vessel comes through as its own MMSI.
+          const identifier =
+            track.name === track.id
+              ? ""
+              : ` · ${sea ? "MMSI" : "ICAO"} ${sea ? track.id : track.id.toUpperCase()}`;
+          trackHits.push({
             scope: "JUMP",
-            label: `${track.name} · ${track.kind === "sea" ? "surface" : "air"}${track.sog != null ? ` · ${track.sog}kt` : ""}`,
+            label: `${track.name}${identifier} · ${sea ? "surface" : "air"}${track.sog != null ? ` · ${track.sog}kt` : ""}`,
             keys: track.flag ?? "",
             run: () => selectTrack(track.id, { fly: true }),
           });
@@ -462,7 +478,10 @@ export default function WatchConsole() {
       }
 
       if (!q) return commands;
-      return commands.filter((c) => `${c.scope} ${c.label}`.toLowerCase().includes(q));
+      return [
+        ...trackHits,
+        ...commands.filter((c) => `${c.scope} ${c.label}`.toLowerCase().includes(q)),
+      ];
     },
     [
       tracks, layers, stackId, selected, selectTrack, selectSensor,
