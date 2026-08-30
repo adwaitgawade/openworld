@@ -16,14 +16,17 @@ const FRAME_SPACING_MS = 55_000;
  *
  * A full snapshot is 10-15k track objects; keeping 40 of those would be tens of
  * megabytes for nothing. The trail behind a selection only needs where each
- * track was, so a frame holds ids (strings shared with the live snapshot, so
- * effectively free) plus two typed arrays.
+ * track was — in three dimensions, since it is drawn at altitude beside the
+ * aircraft — so a frame holds ids (strings shared with the live snapshot, so
+ * effectively free) plus three typed arrays.
  */
 export type HistoryFrame = {
   ts: number;
   ids: string[];
   lon: Float32Array;
   lat: Float32Array;
+  /** Feet. Zero for surface tracks and anything not reporting an altitude. */
+  alt: Float32Array;
 };
 
 function toFrame(snapshot: FeedSnapshot): HistoryFrame {
@@ -33,12 +36,14 @@ function toFrame(snapshot: FeedSnapshot): HistoryFrame {
     ids: new Array<string>(n),
     lon: new Float32Array(n),
     lat: new Float32Array(n),
+    alt: new Float32Array(n),
   };
   for (let i = 0; i < n; i++) {
     const t = snapshot.tracks[i];
     frame.ids[i] = t.id;
     frame.lon[i] = t.lon;
     frame.lat[i] = t.lat;
+    frame.alt[i] = t.kind === "air" && !t.onGround && t.alt != null ? t.alt : 0;
   }
   return frame;
 }

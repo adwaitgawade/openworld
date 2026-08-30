@@ -82,8 +82,8 @@ type Props = {
   pov: boolean;
   /** Degrees below horizontal; in POV this is the chase angle. */
   tiltDeg: number;
-  /** Past positions of the selection, oldest first. */
-  trail: [number, number][];
+  /** Past positions of the selection, oldest first: lon, lat, metres. */
+  trail: [number, number, number][];
   /** Scheduled route of the selection, when it has one. */
   route: RouteGeometry | null;
   stackId: MapStackId;
@@ -950,7 +950,10 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
 
     if (trail.length > 1) {
       trails.add({
-        positions: Cesium.Cartesian3.fromDegreesArray(trail.flat()),
+        // Heights, not a flat array: the trail is the aircraft's own past, and
+        // it belongs at the altitude it was flown rather than on the terrain
+        // under it now that the route and the dots are in the air.
+        positions: Cesium.Cartesian3.fromDegreesArrayHeights(trail.flat()),
         width: 1.2,
         material: Cesium.Material.fromType("Color", {
           color: Cesium.Color.fromCssColorString(ACCENT).withAlpha(0.6),

@@ -105,7 +105,7 @@ type Props = {
   route: RouteGeometry | null;
   /** Fly the camera to one end of that route. */
   onAirport: (lon: number, lat: number) => void;
-  trail: [number, number][];
+  trail: [number, number, number][];
   stackId: MapStackId;
   onStack: (id: MapStackId) => void;
   /** Whether the alert queue occupies the left rail. */

@@ -35,6 +35,8 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 type Provider = {
   id: string;
   url: (lat: number, lon: number) => string;
+  /** Single-aircraft lookup by ICAO24 hex, where the provider offers one. */
+  one?: (hex: string) => string;
   /** Which key the aircraft array arrives under. */
   key: "aircraft" | "ac";
 };
@@ -48,6 +50,7 @@ const PROVIDERS: Provider[] = [
   {
     id: "adsb.lol",
     url: (lat, lon) => `https://api.adsb.lol/v2/point/${lat}/${lon}/${RADIUS_NM}`,
+    one: (hex) => `https://api.adsb.lol/v2/icao/${hex.toLowerCase()}`,
     key: "ac",
   },
 ];
@@ -165,6 +168,49 @@ export type AdsbSweep = {
   anchorsOk: number;
   anchorsTotal: number;
 };
+
+/**
+ * One aircraft, live.
+ *
+ * The globe's picture is a 60-second cache of a global sweep, which is right
+ * for 20 000 dots and wrong for the one an operator is watching. adsb.lol
+ * answers a single hex in well under a second with a fix typically a fraction
+ * of a second old, keyless and unmetered — OpenSky charges a credit per query
+ * against a 4 000/day allowance, which a 5-second poll would drain in an
+ * afternoon.
+ *
+ * Returns null when no receiver currently hears the aircraft: coverage is
+ * volunteer-run and genuinely absent over oceans, so the caller keeps the
+ * sweep's own position rather than treating this as an error.
+ */
+export async function fetchAdsbOne(
+  hex: string,
+  signal?: AbortSignal,
+): Promise<Track | null> {
+  for (const provider of PROVIDERS) {
+    if (!provider.one) continue;
+    try {
+      const res = await fetch(provider.one(hex), {
+        headers: { accept: "application/json", "user-agent": UA },
+        signal,
+        cache: "no-store",
+      });
+      if (!res.ok) continue;
+
+      const json = (await res.json()) as Partial<Record<Provider["key"], Aircraft[]>>;
+      const ac = (json[provider.key] ?? []).find(
+        (a) => a.lat != null && a.lon != null,
+      );
+      if (!ac) continue;
+
+      const [track] = normalise(new Map([[ac.hex, ac]]), provider.id);
+      return track ?? null;
+    } catch {
+      // Try the next provider; a single unreachable one is not a failure.
+    }
+  }
+  return null;
+}
 
 export async function fetchAdsb(signal?: AbortSignal): Promise<AdsbSweep> {
   const failures: string[] = [];

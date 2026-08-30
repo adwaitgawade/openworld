@@ -18,6 +18,7 @@ import GlobeStage from "./GlobeStage";
 import PriorityQueue, { type AlertFilter } from "./PriorityQueue";
 import TopBar from "./TopBar";
 import { useFeed } from "./useFeed";
+import { useLiveTrack } from "./useLiveTrack";
 import { useAircraftDetail } from "./useAircraftDetail";
 import type {
   GlobeStats,
@@ -127,20 +128,51 @@ export default function WatchConsole() {
     return { air, ground, sea };
   }, [tracks]);
 
-  // Past positions of the selection, for the trail behind it.
-  const trail = useMemo<[number, number][]>(() => {
-    if (!selectedTrackId) return [];
-    const path: [number, number][] = [];
-    for (const frame of history) {
-      const i = frame.ids.indexOf(selectedTrackId);
-      if (i >= 0) path.push([frame.lon[i], frame.lat[i]]);
-    }
-    const current = byId.get(selectedTrackId);
-    if (current) path.push([current.lon, current.lat]);
-    return path;
-  }, [selectedTrackId, history, byId]);
+  // Past positions of the selection, for the trail behind it. Carried in three
+  // dimensions: the aircraft and its route are drawn at altitude, so a trail on
+  // the ground would be the one thing left lying on the terrain.
+  const sweepTrack = selectedTrackId ? (byId.get(selectedTrackId) ?? null) : null;
 
-  const selected = selectedTrackId ? (byId.get(selectedTrackId) ?? null) : null;
+  // The selection alone is polled every five seconds against adsb.lol, which
+  // answers a single hex with a sub-second-old fix. Everything else on the
+  // globe still comes from the sixty-second sweep, where that trade is right.
+  const live = useLiveTrack(sweepTrack?.kind === "air" ? sweepTrack.id : null);
+
+  /**
+   * The selection, merged rather than replaced.
+   *
+   * The live fix supersedes the sweep's position, which may be a minute old by
+   * now, but the two feeds do not carry the same fields: adsb.lol has RSSI and
+   * message counts and no country, OpenSky has origin country and emitter
+   * category and no signal strength. Taking every value the live fix actually
+   * reports, and keeping the sweep's where it reports none, leaves the readout
+   * with both instead of whichever feed answered last.
+   */
+  const selected = useMemo<Track | null>(() => {
+    if (!live.track) return sweepTrack;
+    if (!sweepTrack) return live.track;
+
+    const merged: Record<string, unknown> = { ...sweepTrack };
+    for (const [key, value] of Object.entries(live.track)) {
+      if (value != null) merged[key] = value;
+    }
+    return merged as Track;
+  }, [live.track, sweepTrack]);
+
+  const trail = useMemo<[number, number, number][]>(() => {
+    if (!selectedTrackId) return [];
+
+    // History covers the time before this aircraft was selected, at one sample
+    // a minute; the live path takes over from there at one every five seconds.
+    // Frames after live tracking began would double back over it.
+    const path: [number, number, number][] = [];
+    for (const frame of history) {
+      if (live.since && frame.ts >= live.since) break;
+      const i = frame.ids.indexOf(selectedTrackId);
+      if (i >= 0) path.push([frame.lon[i], frame.lat[i], frame.alt[i] * FT_TO_M]);
+    }
+    return path.concat(live.path);
+  }, [selectedTrackId, history, live.since, live.path]);
   // A track can drop out of the feed mid-chase; when it does the camera comes
   // free on its own rather than riding a position that stopped updating.
   const povActive = pov && selected !== null;
