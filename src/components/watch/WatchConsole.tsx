@@ -15,14 +15,17 @@ import type { Alert, Track } from "@/lib/watch/types";
 import CommandPalette, { type Command } from "./CommandPalette";
 import GlobeStage from "./GlobeStage";
 import PriorityQueue, { type AlertFilter } from "./PriorityQueue";
-import Timeline, { WINDOW_MS } from "./Timeline";
 import TopBar, { type ViewId } from "./TopBar";
-import { useFeed, type HistoryFrame } from "./useFeed";
-import type { GlobeStats, LayerId, Layers, ReplayFrame, WatchGlobeHandle } from "./WatchGlobe";
+import { useFeed } from "./useFeed";
+import { useAircraftDetail } from "./useAircraftDetail";
+import type {
+  GlobeStats,
+  LayerId,
+  Layers,
+  RouteGeometry,
+  WatchGlobeHandle,
+} from "./WatchGlobe";
 import "./watch.css";
-
-/** Below this the timeline head counts as live. */
-const LIVE_EPSILON_MS = 30_000;
 
 /** Degrees below horizontal the camera starts at: straight down. */
 const DEFAULT_TILT = 90;
@@ -48,7 +51,7 @@ const COVERAGE_LAYERS: Layers = {
 };
 
 export default function WatchConsole() {
-  const { snapshot, history, since, error } = useFeed();
+  const { snapshot, history, error } = useFeed();
   const globeRef = useRef<WatchGlobeHandle>(null);
 
   const [coverage, setCoverage] = useState(false);
@@ -76,8 +79,6 @@ export default function WatchConsole() {
   const [buildingAt, setBuildingAt] = useState<{ x: number; y: number } | null>(null);
   const [buildingDetails, setBuildingDetails] = useState<BuildingDetails | null>(null);
   const [buildingDetailsError, setBuildingDetailsError] = useState<string | null>(null);
-  const [offsetMs, setOffsetMs] = useState(0);
-  const [speed, setSpeed] = useState<number | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
@@ -120,45 +121,6 @@ export default function WatchConsole() {
     return { air, ground, sea };
   }, [tracks]);
 
-  // ── replay ───────────────────────────────────────────────
-  const live = offsetMs < LIVE_EPSILON_MS;
-
-  // Advance the head in real time while a playback rate is engaged.
-  useEffect(() => {
-    if (speed == null || live) return;
-    const timer = setInterval(() => {
-      setOffsetMs((previous) => {
-        const next = previous - 250 * speed;
-        // Catching up with live ends playback; there is nothing ahead to play.
-        if (next <= 0) setSpeed(null);
-        return Math.max(0, next);
-      });
-    }, 250);
-    return () => clearInterval(timer);
-  }, [speed, live]);
-
-  const replayFrame: HistoryFrame | null = useMemo(() => {
-    if (live || history.length === 0) return null;
-    const target = now - offsetMs;
-    if (target < history[0].ts) return null;
-    let best = history[0];
-    for (const frame of history) {
-      if (Math.abs(frame.ts - target) < Math.abs(best.ts - target)) best = frame;
-    }
-    return best;
-  }, [live, history, now, offsetMs]);
-
-  const replay: ReplayFrame | null = replayFrame
-    ? {
-        ids: replayFrame.ids,
-        kind: replayFrame.kind,
-        lon: replayFrame.lon,
-        lat: replayFrame.lat,
-      }
-    : null;
-
-  const shownAlerts = replayFrame ? replayFrame.alerts : alerts;
-
   // Past positions of the selection, for the trail behind it.
   const trail = useMemo<[number, number][]>(() => {
     if (!selectedTrackId) return [];
@@ -168,14 +130,53 @@ export default function WatchConsole() {
       if (i >= 0) path.push([frame.lon[i], frame.lat[i]]);
     }
     const current = byId.get(selectedTrackId);
-    if (current && live) path.push([current.lon, current.lat]);
+    if (current) path.push([current.lon, current.lat]);
     return path;
-  }, [selectedTrackId, history, byId, live]);
+  }, [selectedTrackId, history, byId]);
 
   const selected = selectedTrackId ? (byId.get(selectedTrackId) ?? null) : null;
   // A track can drop out of the feed mid-chase; when it does the camera comes
   // free on its own rather than riding a position that stopped updating.
   const povActive = pov && selected !== null;
+
+  /**
+   * The callsign to look a route up by, or null when there is nothing to ask.
+   *
+   * `name` falls back to the ICAO24 or the registration when the transponder
+   * reports no callsign, and neither of those resolves to a route — recognise
+   * them here rather than spending a request to be told so.
+   */
+  const routeCallsign = useMemo(() => {
+    if (!selected || selected.kind !== "air") return null;
+    const name = selected.name.trim().toUpperCase();
+    if (!name || name === selected.id.trim().toUpperCase()) return null;
+    if (selected.reg && name === selected.reg.trim().toUpperCase()) return null;
+    return name;
+  }, [selected]);
+
+  const aircraftDetail = useAircraftDetail(
+    selected?.kind === "air" ? selected.id : null,
+    routeCallsign,
+  );
+
+  /** The route as the globe wants it: two endpoints and where the flight is. */
+  const routeGeometry = useMemo<RouteGeometry | null>(() => {
+    const route = aircraftDetail.route;
+    if (!route || !selected || selected.kind !== "air") return null;
+    return {
+      origin: { lon: route.origin.lon, lat: route.origin.lat, code: route.origin.iata ?? route.origin.icao },
+      destination: {
+        lon: route.destination.lon,
+        lat: route.destination.lat,
+        code: route.destination.iata ?? route.destination.icao,
+      },
+      at: { lon: selected.lon, lat: selected.lat },
+    };
+  }, [aircraftDetail.route, selected]);
+
+  const flyToAirport = useCallback((lon: number, lat: number) => {
+    globeRef.current?.flyToAirport(lon, lat);
+  }, []);
 
   // ── actions ──────────────────────────────────────────────
   const flyToTrack = useCallback(
@@ -273,22 +274,12 @@ export default function WatchConsole() {
         say("Coverage view — lanes and the circles nothing reports from");
       } else {
         setLayers(LIVE_LAYERS);
-        if (next === "live") {
-          setOffsetMs(0);
-          setSpeed(null);
-        } else if (history.length === 0) {
-          say("Replay has nothing buffered yet — history starts when the console opens");
-        } else {
-          setOffsetMs(Math.min(WINDOW_MS, now - since));
-        }
       }
     },
-    [history.length, now, since, say],
+    [say],
   );
 
-  // The tab is a readout of what the console is doing, not a separate source of
-  // truth: scrubbing the timeline moves it to REPLAY on its own.
-  const view: ViewId = coverage ? "coverage" : live ? "live" : "replay";
+  const view: ViewId = coverage ? "coverage" : "live";
 
   const copySelection = useCallback(() => {
     if (!selected) return;
@@ -369,14 +360,6 @@ export default function WatchConsole() {
           scope: "VIEW",
           label: "Frame the whole globe",
           run: () => globeRef.current?.flyTo(0, 15, 22_000_000),
-        },
-        {
-          scope: "VIEW",
-          label: "Return to live",
-          run: () => {
-            setOffsetMs(0);
-            setSpeed(null);
-          },
         },
         {
           scope: "VIEW",
@@ -479,7 +462,7 @@ export default function WatchConsole() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const unresolved = shownAlerts.filter((a) => a.sev <= 2).length;
+  const unresolved = alerts.filter((a) => a.sev <= 2).length;
 
   return (
     <div className="watch">
@@ -495,7 +478,7 @@ export default function WatchConsole() {
 
       <div className="wmid">
         <PriorityQueue
-          alerts={shownAlerts}
+          alerts={alerts}
           filter={filter}
           onFilter={setFilter}
           selectedId={selectedAlertId}
@@ -506,11 +489,13 @@ export default function WatchConsole() {
         <GlobeStage
           globeRef={globeRef}
           tracks={tracks}
-          replay={replay}
           layers={layers}
           onLayer={toggleLayer}
           counts={counts}
           selected={selected}
+          detail={aircraftDetail}
+          route={routeGeometry}
+          onAirport={flyToAirport}
           trail={trail}
           stackId={stackId}
           buildingStyleId={buildingStyleId}
@@ -538,16 +523,6 @@ export default function WatchConsole() {
           onCopy={copySelection}
         />
       </div>
-
-      <Timeline
-        offsetMs={offsetMs}
-        onOffset={setOffsetMs}
-        speed={speed}
-        onSpeed={setSpeed}
-        since={since}
-        alerts={alerts}
-        now={now}
-      />
 
       {paletteOpen && (
         <CommandPalette onClose={() => setPaletteOpen(false)} commands={buildCommands} />

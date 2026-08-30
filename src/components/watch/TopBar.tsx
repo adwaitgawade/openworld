@@ -4,11 +4,10 @@ import { useEffect, useState } from "react";
 
 import type { FeedHealth } from "@/lib/watch/types";
 
-export type ViewId = "live" | "replay" | "coverage";
+export type ViewId = "live" | "coverage";
 
 const VIEWS: { id: ViewId; label: string }[] = [
   { id: "live", label: "LIVE" },
-  { id: "replay", label: "REPLAY" },
   { id: "coverage", label: "COVERAGE" },
 ];
 

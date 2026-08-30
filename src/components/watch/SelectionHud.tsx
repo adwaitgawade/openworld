@@ -4,6 +4,10 @@ import type { ReactNode } from "react";
 
 import type { Track } from "@/lib/watch/types";
 
+import type { RouteAirport } from "@/lib/watch/adsbdb";
+
+import type { DetailState } from "./useAircraftDetail";
+
 /**
  * Waving flags from flagcdn.com (flagpedia.net/download/api), keyed by the
  * lowercase ISO-3166 alpha-2 code the feeds already give us.
@@ -43,8 +47,141 @@ function fixAge(fixedAt: number, now: number): string {
   return minutes < 90 ? `${minutes}m` : `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}`;
 }
 
+/**
+ * The airframe: photograph, type and registered operator.
+ *
+ * Rendered only once adsbdb has answered — this is the one part of the HUD
+ * that is not off the transponder, and a placeholder frame flashing on every
+ * selection would read as a feed glitch. The photograph is best-effort: plenty
+ * of airframes have never been photographed, and airport-data.com occasionally
+ * 404s one it has indexed, so it removes itself rather than leaving a gap.
+ */
+function AircraftBand({ state }: { state: DetailState }) {
+  const aircraft = state.aircraft;
+  if (!aircraft) return null;
+
+  const type = [aircraft.manufacturer, aircraft.type].filter(Boolean).join(" ");
+
+  return (
+    <div className="wac">
+      {aircraft.photoThumb && (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          className="acphoto"
+          src={aircraft.photoThumb}
+          alt=""
+          onError={(e) => {
+            e.currentTarget.style.display = "none";
+          }}
+        />
+      )}
+      <div className="acmeta">
+        <b>{aircraft.registration}</b>
+        <span title={type}>{type || aircraft.icaoType || "\u2014"}</span>
+        {aircraft.owner && (
+          <em title={aircraft.owner}>
+            {aircraft.ownerCountryIso && <Flag code={aircraft.ownerCountryIso} />}
+            {aircraft.owner}
+          </em>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * One end of the route: the airport code, and the ICAO identifier under it.
+ *
+ * The code is a button — clicking it flies the camera to the field. Underlined
+ * because that is the affordance the dense panel has room for; a separate
+ * control per end would cost a row the band cannot spare.
+ */
+function RouteEnd({
+  at,
+  onAirport,
+  to,
+}: {
+  at: RouteAirport;
+  onAirport: (lon: number, lat: number) => void;
+  to?: boolean;
+}) {
+  return (
+    <span className={to ? "rto" : undefined}>
+      <button
+        type="button"
+        className="racode"
+        onClick={() => onAirport(at.lon, at.lat)}
+        title={`Fly to ${at.name}`}
+      >
+        {/* IATA is what a boarding pass says, but a freight or regional field
+            may only have an ICAO identifier — never show an empty code. */}
+        {at.iata ?? at.icao}
+      </button>
+      <i>{at.icao}</i>
+    </span>
+  );
+}
+
+/**
+ * Origin and destination for the selected flight.
+ *
+ * Four states, and they must not be confused with each other: no lookup was
+ * made (nothing rendered at all), one is in flight, one failed, and one came
+ * back saying this aircraft has no scheduled route. The last is the normal
+ * answer over general aviation, so it is stated plainly rather than styled as
+ * a fault.
+ */
+function RouteBand({
+  state,
+  onAirport,
+}: {
+  state: DetailState;
+  onAirport: (lon: number, lat: number) => void;
+}) {
+  if (!state.modeS) return null;
+
+  if (state.loading || state.error || !state.route) {
+    return (
+      <div className="wroute rnone">
+        {state.loading
+          ? "RESOLVING ROUTE\u2026"
+          : state.error
+            ? "LOOKUP UNAVAILABLE"
+            : "NO SCHEDULED ROUTE"}
+      </div>
+    );
+  }
+
+  const { origin, destination, airline, callsignIata } = state.route;
+
+  return (
+    <div className="wroute">
+      <div className="rends">
+        <RouteEnd at={origin} onAirport={onAirport} />
+        <u />
+        <RouteEnd at={destination} onAirport={onAirport} to />
+      </div>
+      <div className="rplaces">
+        <span title={origin.name}>{origin.municipality ?? origin.name}</span>
+        <span className="rto" title={destination.name}>
+          {destination.municipality ?? destination.name}
+        </span>
+      </div>
+      {(airline || callsignIata) && (
+        <div className="rop">
+          {[airline?.name, callsignIata].filter(Boolean).join(" \u00b7 ")}
+        </div>
+      )}
+    </div>
+  );
+}
+
 type Props = {
   track: Track;
+  /** Airframe and route from adsbdb, when the selection is an aircraft. */
+  detail: DetailState;
+  /** Fly the camera to an airport named in the route band. */
+  onAirport: (lon: number, lat: number) => void;
   now: number;
   /** True while the camera is locked to this track. */
   pov: boolean;
@@ -55,7 +192,7 @@ type Props = {
 };
 
 export default function SelectionHud({
-  track, now, pov, onPov, onFollow, onCopy, onClear,
+  track, detail, onAirport, now, pov, onPov, onFollow, onCopy, onClear,
 }: Props) {
   const sea = track.kind === "sea";
   const stale = now - track.fixedAt > 30 * 60_000;
@@ -90,8 +227,11 @@ export default function SelectionHud({
     ]
     : [
       ["ICAO24", track.id.toUpperCase()],
-      ["REGISTRATION", dash(track.reg)],
-      ["CATEGORY", dash(track.cls)],
+      // adsbdb knows the tail number and ICAO type for nearly every airframe;
+      // OpenSky's state vector has no registration field at all and reports
+      // "NO INFO" as the category for most of them.
+      ["REGISTRATION", dash(detail.aircraft?.registration ?? track.reg)],
+      ["TYPE", dash(detail.aircraft?.icaoType ?? track.cls)],
       ["GS", track.sog == null ? "\u2014" : `${track.sog} kt`],
       // The globe puts a surfaced aircraft on the terrain, so its altitude
       // field is the one thing here that is not a number off the feed.
@@ -149,6 +289,9 @@ export default function SelectionHud({
           )}
         </em>
       </div>
+
+      <AircraftBand state={detail} />
+      <RouteBand state={detail} onAirport={onAirport} />
 
       <div className="wkv">
         {cells.map(([label, value]) => (

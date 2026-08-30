@@ -41,13 +41,6 @@ export type LayerId =
   | "buildings";
 export type Layers = Record<LayerId, boolean>;
 
-export type ReplayFrame = {
-  ids: string[];
-  kind: Uint8Array;
-  lon: Float32Array;
-  lat: Float32Array;
-};
-
 export type GlobeStats = {
   inView: number;
   /** Ground distance the 76px scale bar spans, in metres. */
@@ -58,16 +51,29 @@ export type GlobeStats = {
   modelled: number;
 };
 
+/**
+ * The selected flight's scheduled route, ready to draw.
+ *
+ * `at` splits it: everything before is flown, everything after is still to go.
+ * Null while the aircraft has dropped out of the feed, which leaves the whole
+ * arc drawn as remaining rather than guessing where it got to.
+ */
+export type RouteGeometry = {
+  origin: { lon: number; lat: number; code: string };
+  destination: { lon: number; lat: number; code: string };
+  at: { lon: number; lat: number } | null;
+};
+
 export type WatchGlobeHandle = {
   flyTo(lon: number, lat: number, heightMetres?: number): void;
+  /** Pulls back to a globe view, then descends on the field. */
+  flyToAirport(lon: number, lat: number): void;
   /** Pivots to `deg` below horizontal around what the camera is looking at. */
   setTilt(deg: number): void;
 };
 
 type Props = {
   tracks: Track[];
-  /** Non-null while the timeline head is behind live. */
-  replay: ReplayFrame | null;
   layers: Layers;
   selectedId: string | null;
   /** True while the camera should ride with the selection. */
@@ -76,6 +82,8 @@ type Props = {
   tiltDeg: number;
   /** Past positions of the selection, oldest first. */
   trail: [number, number][];
+  /** Scheduled route of the selection, when it has one. */
+  route: RouteGeometry | null;
   stackId: MapStackId;
   buildingStyleId: BuildingStyleId;
   onSelect: (id: string | null) => void;
@@ -92,6 +100,21 @@ const AIR_COLOR = "#4FD1E0";
 const GROUND_COLOR = "#2E8794";
 const SEA_COLOR = "#E8A33D";
 const ACCENT = "#4FD1E0";
+/**
+ * Route line: flown behind the aircraft, still to go ahead of it.
+ *
+ * The yellow is deliberately further from amber than the palette's own
+ * `--am`, which is already spoken for by surface tracks — a route leg and a
+ * scatter of vessels must not read as the same thing.
+ */
+const ROUTE_FLOWN_COLOR = "#7BE38A";
+const ROUTE_REMAINING_COLOR = "#F2DE4B";
+/** Apex of the two-leg airport flight, high enough to see the whole globe. */
+const AIRPORT_PULLBACK_M = 9_000_000;
+/** A large airport and its immediate surroundings, as a sphere to frame. */
+const AIRPORT_FIELD_RADIUS_M = 6_000;
+/** How far back the descent settles from that sphere. */
+const AIRPORT_RANGE_M = 16_000;
 const LANE_COLOR = "#6E7F8C";
 const OFFLINE_COLOR = "#E8577F";
 
@@ -210,7 +233,7 @@ const HIGHLIGHT_COLOR = (Cesium: typeof import("cesium")) =>
 
 const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
   {
-    tracks, replay, layers, selectedId, pov, tiltDeg, trail, stackId, buildingStyleId,
+    tracks, layers, selectedId, pov, tiltDeg, trail, route, stackId, buildingStyleId,
     onSelect, onCursor, onStats, onReady, onBuildingPick, onBuildingAnchor,
     onBuildingsStatus,
   },
@@ -230,6 +253,9 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
   const lanesRef = useRef<import("cesium").PolylineCollection | null>(null);
   const gapsRef = useRef<import("cesium").PolylineCollection | null>(null);
   const trailRef = useRef<import("cesium").PolylineCollection | null>(null);
+  const routeRef = useRef<import("cesium").PolylineCollection | null>(null);
+  const routePointsRef = useRef<import("cesium").PointPrimitiveCollection | null>(null);
+  const routeLabelsRef = useRef<import("cesium").LabelCollection | null>(null);
   const labelsRef = useRef<import("cesium").LabelCollection | null>(null);
   const markerRef = useRef<import("cesium").BillboardCollection | null>(null);
 
@@ -275,7 +301,6 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
   /** Resolved terrain height per on-ground track, kept across rebuilds. */
   const groundHeightRef = useRef(new Map<string, number>());
   const selectedRef = useRef<string | null>(null);
-  const replayingRef = useRef(false);
   // Read from the render loop, which must not re-subscribe when they change.
   const povRef = useRef(pov);
   const tiltRef = useRef(tiltDeg);
@@ -301,6 +326,49 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
         viewer.camera.flyTo({
           destination: Cesium.Cartesian3.fromDegrees(lon, lat, heightMetres),
           duration: 1.6,
+        });
+      },
+      /**
+       * Two legs, because one is disorienting: an airport can be a hemisphere
+       * away, and a single flight there skims the surface at low altitude with
+       * nothing recognisable passing underneath. Pulling back to where the
+       * whole globe is visible first makes the traverse legible, and the
+       * descent then lands on the field looking north and slightly obliquely,
+       * so the runways read as ground rather than as a map.
+       */
+      flyToAirport(lon, lat) {
+        const viewer = viewerRef.current;
+        const Cesium = cesiumRef.current;
+        if (!viewer || !Cesium || viewer.isDestroyed()) return;
+
+        const { camera } = viewer;
+        camera.flyTo({
+          destination: Cesium.Cartesian3.fromDegrees(lon, lat, AIRPORT_PULLBACK_M),
+          duration: 1.5,
+          easingFunction: Cesium.EasingFunction.QUADRATIC_IN_OUT,
+          complete: () => {
+            if (viewer.isDestroyed()) return;
+            // Framed against a sphere the size of the field rather than flown
+            // to a point: with a pitched camera a `destination` is where the
+            // camera ends up, not what it looks at, which leaves the airport
+            // out of frame below. A bounding sphere keeps the target centred
+            // and lets Cesium solve for the position.
+            camera.flyToBoundingSphere(
+              new Cesium.BoundingSphere(
+                Cesium.Cartesian3.fromDegrees(lon, lat),
+                AIRPORT_FIELD_RADIUS_M,
+              ),
+              {
+                offset: new Cesium.HeadingPitchRange(
+                  0,
+                  Cesium.Math.toRadians(-60),
+                  AIRPORT_RANGE_M,
+                ),
+                duration: 2.2,
+                easingFunction: Cesium.EasingFunction.QUADRATIC_OUT,
+              },
+            );
+          },
         });
       },
       /**
@@ -406,6 +474,10 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
       gapsRef.current = gaps;
       const trails = scene.primitives.add(new Cesium.PolylineCollection());
       trailRef.current = trails;
+      const routes = scene.primitives.add(new Cesium.PolylineCollection());
+      routeRef.current = routes;
+      routePointsRef.current = scene.primitives.add(new Cesium.PointPrimitiveCollection());
+      routeLabelsRef.current = scene.primitives.add(new Cesium.LabelCollection());
       const labels = scene.primitives.add(new Cesium.LabelCollection());
       labelsRef.current = labels;
       const markers = scene.primitives.add(new Cesium.BillboardCollection());
@@ -704,80 +776,53 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
     const sea = Cesium.Color.fromCssColorString(SEA_COLOR);
     const entries: Entry[] = [];
 
-    if (replay) {
-      for (let i = 0; i < replay.ids.length; i++) {
-        const kind = replay.kind[i] === 1 ? "sea" : "air";
-        entries.push({
-          id: replay.ids[i],
-          kind,
-          lon: replay.lon[i],
-          lat: replay.lat[i],
-          height: 0,
-          onGround: false,
-          grounded: false,
-          hdg: null,
-          sog: null,
-          fixedAt: 0,
-          point: collection.add({
-            id: replay.ids[i],
-            position: Cesium.Cartesian3.fromDegrees(replay.lon[i], replay.lat[i]),
-            pixelSize: 2.4,
-            disableDepthTestDistance: DOT_DEPTH_TEST_OFF_M,
-            color: (kind === "sea" ? sea : air).withAlpha(0.75),
-          }),
-        });
-      }
-    } else {
-      const cache = groundHeightRef.current;
-      const seen = new Set<string>();
+    const cache = groundHeightRef.current;
+    const seen = new Set<string>();
 
-      for (const t of tracks) {
-        const onGround = t.kind === "air" && Boolean(t.onGround);
-        // Aircraft fly at their reported altitude; a vessel's `alt` is draught,
-        // which is depth below the waterline and not a height at all; and one on
-        // the surface sits on the terrain, wherever that turns out to be.
-        const cached = onGround ? cache.get(t.id) : undefined;
-        const height = onGround
-          ? (cached ?? 0)
-          : t.kind === "air" && t.alt != null
-            ? t.alt * FT_TO_M
-            : 0;
-        if (onGround) seen.add(t.id);
-        entries.push({
+    for (const t of tracks) {
+      const onGround = t.kind === "air" && Boolean(t.onGround);
+      // Aircraft fly at their reported altitude; a vessel's `alt` is draught,
+      // which is depth below the waterline and not a height at all; and one on
+      // the surface sits on the terrain, wherever that turns out to be.
+      const cached = onGround ? cache.get(t.id) : undefined;
+      const height = onGround
+        ? (cached ?? 0)
+        : t.kind === "air" && t.alt != null
+          ? t.alt * FT_TO_M
+          : 0;
+      if (onGround) seen.add(t.id);
+      entries.push({
+        id: t.id,
+        kind: t.kind,
+        lon: t.lon,
+        lat: t.lat,
+        height,
+        onGround,
+        grounded: cached != null,
+        hdg: t.hdg,
+        sog: t.sog,
+        fixedAt: t.fixedAt,
+        point: collection.add({
           id: t.id,
-          kind: t.kind,
-          lon: t.lon,
-          lat: t.lat,
-          height,
-          onGround,
-          grounded: cached != null,
-          hdg: t.hdg,
-          sog: t.sog,
-          fixedAt: t.fixedAt,
-          point: collection.add({
-            id: t.id,
-            position: Cesium.Cartesian3.fromDegrees(t.lon, t.lat, height),
-            pixelSize: t.emergency ? 5 : onGround ? 2.2 : 2.6,
-            disableDepthTestDistance: DOT_DEPTH_TEST_OFF_M,
-            color: t.emergency
-              ? Cesium.Color.fromCssColorString(OFFLINE_COLOR)
-              : t.kind === "sea"
-                ? sea
-                : onGround
-                  ? ground
-                  : air,
-          }),
-        });
-      }
-
-      // Aircraft that took off, or left the feed, stop paying for a cache slot.
-      for (const id of cache.keys()) if (!seen.has(id)) cache.delete(id);
+          position: Cesium.Cartesian3.fromDegrees(t.lon, t.lat, height),
+          pixelSize: t.emergency ? 5 : onGround ? 2.2 : 2.6,
+          disableDepthTestDistance: DOT_DEPTH_TEST_OFF_M,
+          color: t.emergency
+            ? Cesium.Color.fromCssColorString(OFFLINE_COLOR)
+            : t.kind === "sea"
+              ? sea
+              : onGround
+                ? ground
+                : air,
+        }),
+      });
     }
 
+    // Aircraft that took off, or left the feed, stop paying for a cache slot.
+    for (const id of cache.keys()) if (!seen.has(id)) cache.delete(id);
     entriesRef.current = entries;
-    replayingRef.current = Boolean(replay);
     layersDirtyRef.current = true;
-  }, [tracks, replay]);
+  }, [tracks]);
 
   useEffect(() => {
     if (ready) rebuild();
@@ -791,7 +836,7 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
   useEffect(() => {
     const viewer = viewerRef.current;
     const Cesium = cesiumRef.current;
-    if (!ready || replay || !viewer || !Cesium || viewer.isDestroyed()) return;
+    if (!ready || !viewer || !Cesium || viewer.isDestroyed()) return;
 
     const pending = entriesRef.current.filter((e) => e.onGround && !e.grounded);
     if (pending.length === 0) return;
@@ -829,7 +874,7 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
     return () => {
       cancelled = true;
     };
-  }, [ready, tracks, replay]);
+  }, [ready, tracks]);
 
   // ── layer visibility ─────────────────────────────────────
   useEffect(() => {
@@ -880,7 +925,118 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
         }),
       });
     }
-  }, [ready, selectedId, trail, tracks, replay]);
+  }, [ready, selectedId, trail, tracks]);
+
+  // ── the selection's scheduled route ──────────────────────
+  // Drawn from the airport records, not from the track: this is where the
+  // flight is booked to go, so it stays put while the aircraft moves along it.
+  //
+  // Clamped to the ground rather than drawn as ordinary polylines. A line on
+  // the ellipsoid is depth-tested against the globe, so it sinks under terrain
+  // at an oblique angle and z-fights at low altitude — exactly when an operator
+  // is looking closely. A ground primitive is painted onto the surface itself
+  // and stays legible at every zoom and camera angle.
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    const Cesium = cesiumRef.current;
+    const fallback = routeRef.current;
+    const points = routePointsRef.current;
+    const labels = routeLabelsRef.current;
+    if (!ready || !Cesium || !viewer || viewer.isDestroyed() || !fallback) return;
+    if (!points || !labels) return;
+
+    const { scene } = viewer;
+    const drawn: import("cesium").GroundPolylinePrimitive[] = [];
+
+    fallback.removeAll();
+    points.removeAll();
+    labels.removeAll();
+
+    if (route) {
+      const { origin, destination, at } = route;
+      const flown = Cesium.Color.fromCssColorString(ROUTE_FLOWN_COLOR);
+      const remaining = Cesium.Color.fromCssColorString(ROUTE_REMAINING_COLOR);
+
+      const from: [number, number] = [origin.lon, origin.lat];
+      const to: [number, number] = [destination.lon, destination.lat];
+      const here: [number, number] | null = at ? [at.lon, at.lat] : null;
+
+      // Terrain-clamped lines need the depth texture; without it (a software
+      // renderer, or a context that lost the extension) the flat polylines are
+      // still better than nothing.
+      const clamped = Cesium.GroundPolylinePrimitive.isSupported(scene);
+
+      const leg = (
+        a: [number, number],
+        b: [number, number],
+        colour: import("cesium").Color,
+        width: number,
+      ) => {
+        if (clamped) {
+          // GroundPolylineGeometry follows the geodesic itself, so the two
+          // endpoints are all it needs.
+          const primitive = new Cesium.GroundPolylinePrimitive({
+            geometryInstances: new Cesium.GeometryInstance({
+              geometry: new Cesium.GroundPolylineGeometry({
+                positions: Cesium.Cartesian3.fromDegreesArray([...a, ...b]),
+                width,
+              }),
+              attributes: {
+                color: Cesium.ColorGeometryInstanceAttribute.fromColor(colour),
+              },
+            }),
+            appearance: new Cesium.PolylineColorAppearance(),
+          });
+          scene.groundPrimitives.add(primitive);
+          drawn.push(primitive);
+          return;
+        }
+
+        // Chords cut under the surface over a leg this long, so the fallback
+        // subdivides along the great circle — as the sea lanes do.
+        fallback.add({
+          positions: Cesium.Cartesian3.fromDegreesArray(densifyLane([a, b], 1).flat()),
+          width,
+          material: Cesium.Material.fromType("Color", { color: colour }),
+        });
+      };
+
+      // With no fix to split on, the whole route is still to fly.
+      if (here) leg(from, here, flown, 3);
+      leg(here ?? from, to, remaining, here ? 2.5 : 3);
+
+      for (const [end, colour] of [
+        [origin, flown],
+        [destination, remaining],
+      ] as const) {
+        points.add({
+          position: Cesium.Cartesian3.fromDegrees(end.lon, end.lat),
+          pixelSize: 5,
+          color: colour.withAlpha(0.95),
+          outlineColor: Cesium.Color.fromCssColorString("#0B0A09").withAlpha(0.8),
+          outlineWidth: 1,
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        });
+        labels.add({
+          position: Cesium.Cartesian3.fromDegrees(end.lon, end.lat),
+          text: end.code,
+          font: "10px ui-monospace, monospace",
+          fillColor: colour,
+          horizontalOrigin: Cesium.HorizontalOrigin.CENTER,
+          verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+          pixelOffset: new Cesium.Cartesian2(0, -9),
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+        });
+      }
+    }
+
+    // Ground primitives are owned individually rather than by a collection, so
+    // they are removed here instead of at the top of the next run.
+    return () => {
+      if (viewer.isDestroyed()) return;
+      for (const primitive of drawn) scene.groundPrimitives.remove(primitive);
+    };
+  }, [ready, route]);
 
   // ── the render loop: dead reckoning, airframes, readouts ─
   useEffect(() => {
@@ -968,7 +1124,6 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
         const marker = markerRef.current?.length ? markerRef.current.get(0) : null;
         const selected = selectedRef.current;
         const entries = entriesRef.current;
-        const live = !replayingRef.current;
         const showing = layersRef.current;
 
         if (layersDirtyRef.current) {
@@ -989,7 +1144,7 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
           // A taxiing aircraft turns every few hundred metres, so dead reckoning
           // it in a straight line would walk it off the apron and into a
           // terminal. It stays on its last fix until the feed moves it.
-          if (live && entry.kind === "air" && !entry.onGround && entry.hdg != null && entry.sog) {
+          if (entry.kind === "air" && !entry.onGround && entry.hdg != null && entry.sog) {
             const seconds = Math.min(MAX_PROJECT_SEC, (now - entry.fixedAt) / 1000);
             const [lon, lat] = project(entry.lon, entry.lat, entry.hdg, entry.sog, seconds);
             entry.point.position = Cesium.Cartesian3.fromDegrees(
@@ -1005,7 +1160,7 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
         // everything else.
         const height = camera.positionCartographic.height;
         const wantModels =
-          live && (showing.air || showing.ground) && height < MODEL_CAMERA_HEIGHT_M;
+          (showing.air || showing.ground) && height < MODEL_CAMERA_HEIGHT_M;
 
         if (wantModels) ensureModels();
         const owned = poolRef.current;
@@ -1086,7 +1241,7 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
       // Ride with the selection. The aircraft's own heading frame is the
       // reference, so the offset is simply "behind the nose and above it":
       // -X is astern, +Z is up, and the chase angle swings between the two.
-      if (povRef.current && povEntry && !replayingRef.current) {
+      if (povRef.current && povEntry) {
         const entry = povEntry;
         const seconds = Math.min(MAX_PROJECT_SEC, (now - entry.fixedAt) / 1000);
         const [lon, lat] =

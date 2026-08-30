@@ -26,7 +26,7 @@
   --sans: var(--font-geist-sans), system-ui, sans-serif;
 
   display: grid;
-  grid-template-rows: 46px 1fr 48px;
+  grid-template-rows: 46px 1fr;
   height: 100dvh;
   overflow: hidden;
   position: relative;
@@ -475,6 +475,135 @@
   font-style: normal;
   flex: none;
 }
+/* Airframe band: photo, type and operator, above the route. */
+.wac {
+  display: flex;
+  gap: 9px;
+  padding: 8px 11px;
+  border-bottom: 1px solid var(--line);
+  align-items: flex-start;
+}
+.acphoto {
+  width: 88px;
+  height: 59px;
+  object-fit: cover;
+  border: 1px solid var(--line);
+  background: var(--panel2);
+  flex: none;
+}
+.acmeta { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.acmeta b {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.acmeta span,
+.acmeta em {
+  font-size: 10.5px;
+  color: var(--dim);
+  font-style: normal;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.acmeta em { color: var(--faint); display: flex; align-items: center; gap: 5px; }
+.acmeta em .wflag { width: 15px; height: 11px; flex: none; }
+
+/* Route band: origin → destination, between the header and the field grid. */
+.wroute {
+  padding: 7px 11px 8px;
+  border-bottom: 1px solid var(--line);
+}
+.wroute.rnone {
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.13em;
+  color: var(--faint);
+  padding: 7px 11px;
+}
+.rends {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+.rends span {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  min-width: 0;
+}
+/* The code is the control: underlined to say so, and it carries the same
+   weight as the plain text it replaced so the band's rhythm is unchanged. */
+.racode {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--acc);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+  text-decoration-color: color-mix(in srgb, var(--acc) 45%, transparent);
+  transition: text-decoration-color 120ms ease, color 120ms ease;
+}
+.racode:hover { text-decoration-color: var(--acc); }
+.racode:focus-visible { outline: 1px solid var(--acc); outline-offset: 2px; }
+.rends i {
+  font-family: var(--mono);
+  font-size: 8.5px;
+  font-style: normal;
+  letter-spacing: 0.1em;
+  color: var(--faint);
+}
+/* The arrow: a hairline that takes the slack, with a head drawn on its end. */
+.rends u {
+  flex: 1;
+  position: relative;
+  height: 1px;
+  background: var(--line);
+  text-decoration: none;
+  min-width: 14px;
+}
+.rends u::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  top: -2.5px;
+  border-left: 5px solid var(--line);
+  border-top: 3px solid transparent;
+  border-bottom: 3px solid transparent;
+}
+.rplaces {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 3px;
+  font-size: 10.5px;
+  color: var(--faint);
+}
+.rplaces span {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.rplaces .rto { text-align: right; }
+.rop {
+  margin-top: 5px;
+  font-family: var(--mono);
+  font-size: 9px;
+  letter-spacing: 0.11em;
+  color: var(--faint);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .wkv {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -539,72 +668,6 @@
   font-weight: 600;
 }
 .wbtn.pri:hover { filter: brightness(1.12); color: #0b0a09; }
-
-/* ── timeline ────────────────────────────────────────────── */
-.wtl {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  padding: 0 14px;
-  border-top: 1px solid var(--line);
-  background: var(--panel);
-}
-.wtl .lbl { font-family: var(--mono); font-size: 9.5px; letter-spacing: 0.14em; color: var(--faint); flex: none; }
-.wtrack { position: relative; flex: 1; height: 26px; cursor: ew-resize; touch-action: none; }
-.wtrack .axis { position: absolute; top: 12px; left: 0; right: 0; height: 1px; background: var(--line); }
-.wtrack .nohist {
-  position: absolute;
-  top: 6px;
-  bottom: 6px;
-  left: 0;
-  background: repeating-linear-gradient(45deg, transparent, transparent 3px, #1c1b16 3px, #1c1b16 6px);
-  border-right: 1px solid #2b2a22;
-}
-.wtrack .tick { position: absolute; top: 8px; width: 1px; height: 5px; background: #33322a; }
-.wtrack .tick i {
-  position: absolute;
-  top: 7px;
-  left: -14px;
-  width: 28px;
-  text-align: center;
-  font-family: var(--mono);
-  font-size: 8.5px;
-  color: var(--faint);
-  font-style: normal;
-}
-.wtrack .ev { position: absolute; top: 3px; width: 2px; height: 7px; background: var(--am); }
-.wtrack .ev.b { background: var(--mg); }
-.wtrack .head { position: absolute; top: 0; width: 2px; height: 26px; background: var(--acc); box-shadow: 0 0 8px var(--acc); }
-.wtrack .head::after {
-  content: "";
-  position: absolute;
-  top: -1px;
-  left: -3px;
-  width: 8px;
-  height: 5px;
-  background: var(--acc);
-}
-.wtl .now {
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--txt);
-  flex: none;
-  min-width: 152px;
-  text-align: right;
-}
-.wtl .sp { display: flex; flex: none; }
-.wtl .sp button {
-  font-family: var(--mono);
-  font-size: 9.5px;
-  padding: 3px 7px;
-  border: 1px solid var(--line);
-  border-right: none;
-  color: var(--faint);
-  cursor: pointer;
-  background: none;
-}
-.wtl .sp button:last-child { border-right: 1px solid var(--line); }
-.wtl .sp button.on { color: var(--ink); background: var(--acc); border-color: var(--acc); }
 
 /* ── command palette ─────────────────────────────────────── */
 .wpal {

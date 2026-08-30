@@ -11,11 +11,12 @@ import type { BuildingDetails } from "@/lib/buildingDetails";
 import type { Track } from "@/lib/watch/types";
 import BuildingInfoCallout from "../BuildingInfoCallout";
 import SelectionHud from "./SelectionHud";
+import type { DetailState } from "./useAircraftDetail";
 import type {
   GlobeStats,
   Layers,
   LayerId,
-  ReplayFrame,
+  RouteGeometry,
   WatchGlobeHandle,
 } from "./WatchGlobe";
 
@@ -91,11 +92,16 @@ function fmtScale(metres: number): string {
 type Props = {
   globeRef: Ref<WatchGlobeHandle>;
   tracks: Track[];
-  replay: ReplayFrame | null;
   layers: Layers;
   onLayer: (id: LayerId) => void;
   counts: { air: number; ground: number; sea: number };
   selected: Track | null;
+  /** Airframe and route for the selected aircraft, from adsbdb. */
+  detail: DetailState;
+  /** Scheduled route of the selection, drawn on the globe. */
+  route: RouteGeometry | null;
+  /** Fly the camera to one end of that route. */
+  onAirport: (lon: number, lat: number) => void;
   trail: [number, number][];
   stackId: MapStackId;
   buildingStyleId: BuildingStyleId;
@@ -125,7 +131,7 @@ type Props = {
 };
 
 export default function GlobeStage({
-  globeRef, tracks, replay, layers, onLayer, counts, selected, trail, stackId,
+  globeRef, tracks, layers, onLayer, counts, selected, detail, route, onAirport, trail, stackId,
   buildingStyleId, buildingsStatus, building, buildingAt, buildingDetails,
   buildingDetailsError, onBuildingPick, onBuildingAnchor, onBuildingsStatus,
   tiltDeg, onTilt, pov, onPov, cursor, stats, unresolved, now, onSelect, onCursor, onStats,
@@ -158,12 +164,12 @@ export default function GlobeStage({
       <WatchGlobe
         ref={globeRef}
         tracks={tracks}
-        replay={replay}
         layers={layers}
         selectedId={selected?.id ?? null}
         pov={pov}
         tiltDeg={tiltDeg}
         trail={trail}
+        route={route}
         stackId={stackId}
         buildingStyleId={buildingStyleId}
         onSelect={onSelect}
@@ -305,6 +311,8 @@ export default function GlobeStage({
       {selected && (
         <SelectionHud
           track={selected}
+          detail={detail}
+          onAirport={onAirport}
           now={now}
           pov={pov}
           onPov={onPov}
