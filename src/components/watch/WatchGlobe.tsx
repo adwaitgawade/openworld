@@ -314,6 +314,12 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
   const layersDirtyRef = useRef(true);
 
   const [ready, setReady] = useState(false);
+  /**
+   * Cesium World Terrain resolves after the viewer is constructed, so
+   * `viewer.terrainProvider` is briefly undefined. Nothing may sample against
+   * it until this flips.
+   */
+  const [terrainReady, setTerrainReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useImperativeHandle(
@@ -422,6 +428,13 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
       ]);
       if (disposed) return;
 
+      // Held rather than passed inline: the ion terrain loads asynchronously,
+      // and its ready/error events are the only signal that the viewer has a
+      // provider worth sampling.
+      const worldTerrain = ION_TOKEN
+        ? Cesium.Terrain.fromWorldTerrain({ requestVertexNormals: true })
+        : undefined;
+
       const viewer = new Cesium.Viewer(container, {
         baseLayer: new Cesium.ImageryLayer(imagery[0]),
         baseLayerPicker: false,
@@ -437,9 +450,7 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
         msaaSamples: 4,
         // Terrain is what makes an oblique view read as terrain rather than a
         // painted sphere, and the buildings sources are each paired with one.
-        terrain: ION_TOKEN
-          ? Cesium.Terrain.fromWorldTerrain({ requestVertexNormals: true })
-          : undefined,
+        terrain: worldTerrain,
       });
       viewerRef.current = viewer;
       poolRef.current = { viewer, models: [], state: "empty" };
@@ -452,7 +463,18 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
         viewer.imageryLayers.get(0),
         ...imagery.slice(1).map((o) => viewer.imageryLayers.addImageryProvider(o)),
       ];
-      if (!ION_TOKEN && keylessTerrain) viewer.terrainProvider = keylessTerrain;
+      if (worldTerrain) {
+        worldTerrain.readyEvent.addEventListener(() => setTerrainReady(true));
+        worldTerrain.errorEvent.addEventListener((error: unknown) => {
+          // The globe falls back to the ellipsoid on its own; say so once
+          // rather than letting every sample fail in turn.
+          console.warn("[watch] world terrain unavailable; on-ground tracks stay flat", error);
+        });
+      } else if (keylessTerrain) {
+        // Already awaited, so there is nothing to wait for.
+        viewer.terrainProvider = keylessTerrain;
+        setTerrainReady(true);
+      }
 
       const { scene } = viewer;
       // Day/night on the globe is the terminator the design draws by hand.
@@ -838,6 +860,14 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
     const Cesium = cesiumRef.current;
     if (!ready || !viewer || !Cesium || viewer.isDestroyed()) return;
 
+    // Terrain arrives after the first tracks do. Sampling before it lands
+    // throws "terrainProvider is required" on every batch; there is nothing to
+    // do but wait, and this effect re-runs the moment terrain is ready.
+    if (!terrainReady || !viewer.terrainProvider) return;
+    // A flat ellipsoid answers every query with zero, which is what these
+    // tracks already have.
+    if (viewer.terrainProvider instanceof Cesium.EllipsoidTerrainProvider) return;
+
     const pending = entriesRef.current.filter((e) => e.onGround && !e.grounded);
     if (pending.length === 0) return;
 
@@ -874,7 +904,7 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
     return () => {
       cancelled = true;
     };
-  }, [ready, tracks]);
+  }, [ready, terrainReady, tracks]);
 
   // ── layer visibility ─────────────────────────────────────
   useEffect(() => {

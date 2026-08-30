@@ -69,6 +69,9 @@ const EXTRA_LAYER_ROWS: (LayerRow & { info: string })[] = [
   },
 ];
 
+/** Severity pink, matching the queue's own header and its alert stripes. */
+const QUEUE_COLOR = "#E8577F";
+
 /** Degrees below horizontal, matching the explorer globe's three presets. */
 const TILT_PRESETS: { label: string; deg: number }[] = [
   { label: "HORIZON", deg: 8 },
@@ -105,6 +108,9 @@ type Props = {
   trail: [number, number][];
   stackId: MapStackId;
   onStack: (id: MapStackId) => void;
+  /** Whether the alert queue occupies the left rail. */
+  queueOpen: boolean;
+  onQueue: () => void;
   buildingStyleId: BuildingStyleId;
   buildingsStatus: "idle" | "loading" | "loaded" | "error";
   building: BuildingInfo | null;
@@ -132,7 +138,7 @@ type Props = {
 };
 
 export default function GlobeStage({
-  globeRef, tracks, layers, onLayer, counts, selected, detail, route, onAirport, trail, stackId, onStack,
+  globeRef, tracks, layers, onLayer, counts, selected, detail, route, onAirport, trail, stackId, onStack, queueOpen, onQueue,
   buildingStyleId, buildingsStatus, building, buildingAt, buildingDetails,
   buildingDetailsError, onBuildingPick, onBuildingAnchor, onBuildingsStatus,
   tiltDeg, onTilt, pov, onPov, cursor, stats, unresolved, now, onSelect, onCursor, onStats,
@@ -140,24 +146,16 @@ export default function GlobeStage({
 }: Props) {
   const total = tracks.length;
 
-  // Reference geometry lives behind a disclosure. The coverage view turns both
-  // layers on by preset, so the section opens itself rather than leaving the
-  // user looking at lines with no control for them.
-  const [opened, setOpened] = useState(false);
-  const [info, setInfo] = useState<LayerId | null>(null);
-  // Either the user opened it, or a preset (the coverage view) switched one of
-  // these layers on — in which case the section has to be open to own its
-  // control.
-  const extrasOpen = opened || EXTRA_LAYER_ROWS.some((row) => layers[row.id]);
+  // Reference geometry lives behind a disclosure, opened and closed by hand.
+  const [extrasOpen, setExtrasOpen] = useState(false);
+  // "queue" is not a layer; it shares this slot so only one note is open.
+  const [info, setInfo] = useState<LayerId | "queue" | null>(null);
 
-  // Collapsing hides the geometry too: an unreachable layer left drawn on the
-  // globe is the confusing case.
+  // Collapsing is only collapsing: every switch in here keeps its state, so
+  // reopening the section shows what was left on rather than a reset panel.
   const toggleExtras = () => {
-    if (extrasOpen) {
-      setInfo(null);
-      for (const row of EXTRA_LAYER_ROWS) if (layers[row.id]) onLayer(row.id);
-    }
-    setOpened(!extrasOpen);
+    if (extrasOpen) setInfo(null);
+    setExtrasOpen(!extrasOpen);
   };
 
   return (
@@ -258,6 +256,41 @@ export default function GlobeStage({
                 {info === row.id && <p className="wlyinfo">{row.info}</p>}
               </div>
             ))}
+
+            {/* Not a globe layer but a panel. It sits here because it is the
+                same kind of decision as the rest of this section — something
+                switched off to get the width back — and because the queue is
+                visible on its own, so it needs no control on the front page. */}
+            <div className="wlyrow">
+              <button
+                type="button"
+                className={`wly${queueOpen ? " on" : ""}`}
+                style={{ color: queueOpen ? QUEUE_COLOR : undefined }}
+                onClick={onQueue}
+                aria-pressed={queueOpen}
+              >
+                <span className="sw" />
+                PRIORITY QUEUE
+                {queueOpen && unresolved > 0 && <b>{group(unresolved)}</b>}
+              </button>
+              <button
+                type="button"
+                className={`wlyi${info === "queue" ? " on" : ""}`}
+                aria-label="What the priority queue is"
+                aria-expanded={info === "queue"}
+                onClick={() => setInfo((previous) => (previous === "queue" ? null : "queue"))}
+              >
+                i
+              </button>
+              {info === "queue" && (
+                <p className="wlyinfo">
+                  The left rail: every alert the console has derived from the current
+                  picture, newest first, filterable by rule. Hiding it gives the globe
+                  the rail&rsquo;s width — the alerts carry on being derived either way,
+                  and the unresolved count in the readout still tracks them.
+                </p>
+              )}
+            </div>
           </div>
         )}
       </div>

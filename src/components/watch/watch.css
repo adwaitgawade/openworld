@@ -88,28 +88,6 @@
   color: var(--faint);
   letter-spacing: 0.1em;
 }
-.wtabs { display: flex; height: 100%; flex: none; }
-.wtab {
-  display: flex;
-  align-items: center;
-  padding: 0 15px;
-  font-family: var(--mono);
-  font-size: 10.5px;
-  letter-spacing: 0.13em;
-  color: var(--dim);
-  border-right: 1px solid var(--line);
-  cursor: pointer;
-  background: none;
-  border-top: none;
-  border-bottom: none;
-  border-left: none;
-}
-.wtab:hover { color: var(--txt); background: var(--panel2); }
-.wtab.on {
-  color: var(--acc);
-  box-shadow: inset 0 -2px 0 var(--acc);
-  background: var(--panel2);
-}
 .wsearch {
   display: flex;
   align-items: center;
@@ -252,6 +230,8 @@
 
 /* ── priority queue ──────────────────────────────────────── */
 .wmid { display: grid; grid-template-columns: 302px 1fr; min-height: 0; }
+/* Queue hidden: the globe takes the rail's width rather than leaving a gap. */
+.wmid.noq { grid-template-columns: 1fr; }
 .wrail {
   border-right: 1px solid var(--line);
   display: flex;

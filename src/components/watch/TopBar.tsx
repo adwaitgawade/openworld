@@ -4,13 +4,6 @@ import { useEffect, useState } from "react";
 
 import type { FeedHealth } from "@/lib/watch/types";
 
-export type ViewId = "live" | "coverage";
-
-const VIEWS: { id: ViewId; label: string }[] = [
-  { id: "live", label: "LIVE" },
-  { id: "coverage", label: "COVERAGE" },
-];
-
 function Dot({ status }: { status: FeedHealth["status"] }) {
   return (
     <span className={`wdot${status === "degraded" ? " w" : status === "down" ? " b" : ""}`} />
@@ -41,8 +34,6 @@ function Clock() {
 }
 
 type Props = {
-  view: ViewId;
-  onView: (view: ViewId) => void;
   air: FeedHealth | null;
   sea: FeedHealth | null;
   airCount: number;
@@ -51,7 +42,7 @@ type Props = {
 };
 
 export default function TopBar({
-  view, onView, air, sea, airCount, seaCount, onOpenPalette,
+  air, sea, airCount, seaCount, onOpenPalette,
 }: Props) {
   const latency = air?.latencySec ?? sea?.latencySec ?? null;
   const worst: FeedHealth["status"] =
@@ -67,19 +58,6 @@ export default function TopBar({
         <span className="mk" />
         <b>MERIDIAN</b>
         <span>/ WATCH</span>
-      </div>
-
-      <div className="wtabs">
-        {VIEWS.map((v) => (
-          <button
-            key={v.id}
-            type="button"
-            className={`wtab${view === v.id ? " on" : ""}`}
-            onClick={() => onView(v.id)}
-          >
-            {v.label}
-          </button>
-        ))}
       </div>
 
       <button type="button" className="wsearch" onClick={onOpenPalette}>

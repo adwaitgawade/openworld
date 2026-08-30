@@ -15,7 +15,7 @@ import type { Alert, Track } from "@/lib/watch/types";
 import CommandPalette, { type Command } from "./CommandPalette";
 import GlobeStage from "./GlobeStage";
 import PriorityQueue, { type AlertFilter } from "./PriorityQueue";
-import TopBar, { type ViewId } from "./TopBar";
+import TopBar from "./TopBar";
 import { useFeed } from "./useFeed";
 import { useAircraftDetail } from "./useAircraftDetail";
 import type {
@@ -30,7 +30,8 @@ import "./watch.css";
 /** Degrees below horizontal the camera starts at: straight down. */
 const DEFAULT_TILT = 90;
 
-const LIVE_LAYERS: Layers = {
+/** What the console opens with; every one of these is a toggle in the panel. */
+const DEFAULT_LAYERS: Layers = {
   air: true,
   ground: true,
   sea: true,
@@ -40,22 +41,12 @@ const LIVE_LAYERS: Layers = {
   buildings: false,
 };
 
-const COVERAGE_LAYERS: Layers = {
-  air: false,
-  ground: false,
-  sea: true,
-  lanes: true,
-  gaps: true,
-  labels: true,
-  buildings: false,
-};
 
 export default function WatchConsole() {
   const { snapshot, history, error } = useFeed();
   const globeRef = useRef<WatchGlobeHandle>(null);
 
-  const [coverage, setCoverage] = useState(false);
-  const [layers, setLayers] = useState<Layers>(LIVE_LAYERS);
+  const [layers, setLayers] = useState<Layers>(DEFAULT_LAYERS);
   const [stackId, setStackId] = useState<MapStackId>("esri");
   const [filter, setFilter] = useState<AlertFilter>("ALL");
   const [selectedTrackId, setSelectedTrackId] = useState<string | null>(null);
@@ -80,6 +71,7 @@ export default function WatchConsole() {
   const [buildingDetails, setBuildingDetails] = useState<BuildingDetails | null>(null);
   const [buildingDetailsError, setBuildingDetailsError] = useState<string | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [queueOpen, setQueueOpen] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
   // One shared second-resolution clock. Alert ages and the timeline both read
@@ -266,21 +258,6 @@ export default function WatchConsole() {
     [say],
   );
 
-  const applyView = useCallback(
-    (next: ViewId) => {
-      setCoverage(next === "coverage");
-      if (next === "coverage") {
-        setLayers(COVERAGE_LAYERS);
-        say("Coverage view — lanes and the circles nothing reports from");
-      } else {
-        setLayers(LIVE_LAYERS);
-      }
-    },
-    [say],
-  );
-
-  const view: ViewId = coverage ? "coverage" : "live";
-
   const copySelection = useCallback(() => {
     if (!selected) return;
     // The whole record, not a summary of it: whatever the feed reported is
@@ -361,11 +338,6 @@ export default function WatchConsole() {
           label: "Frame the whole globe",
           run: () => globeRef.current?.flyTo(0, 15, 22_000_000),
         },
-        {
-          scope: "VIEW",
-          label: "Coverage view",
-          run: () => applyView("coverage"),
-        },
       );
 
       for (const preset of [
@@ -427,7 +399,7 @@ export default function WatchConsole() {
     },
     [
       tracks, layers, stackId, selected, selectTrack,
-      toggleLayer, applyView, flyToTrack, copySelection, applyTilt,
+      toggleLayer, flyToTrack, copySelection, applyTilt,
       buildingStyleId, povActive, togglePov,
     ],
   );
@@ -467,8 +439,6 @@ export default function WatchConsole() {
   return (
     <div className="watch">
       <TopBar
-        view={view}
-        onView={applyView}
         air={snapshot?.health.air ?? null}
         sea={snapshot?.health.sea ?? null}
         airCount={counts.air}
@@ -476,15 +446,17 @@ export default function WatchConsole() {
         onOpenPalette={() => setPaletteOpen(true)}
       />
 
-      <div className="wmid">
-        <PriorityQueue
-          alerts={alerts}
-          filter={filter}
-          onFilter={setFilter}
-          selectedId={selectedAlertId}
-          onSelect={selectAlert}
-          now={now}
-        />
+      <div className={`wmid${queueOpen ? "" : " noq"}`}>
+        {queueOpen && (
+          <PriorityQueue
+            alerts={alerts}
+            filter={filter}
+            onFilter={setFilter}
+            selectedId={selectedAlertId}
+            onSelect={selectAlert}
+            now={now}
+          />
+        )}
 
         <GlobeStage
           globeRef={globeRef}
@@ -499,6 +471,8 @@ export default function WatchConsole() {
           trail={trail}
           stackId={stackId}
           onStack={setStackId}
+          queueOpen={queueOpen}
+          onQueue={() => setQueueOpen((previous) => !previous)}
           buildingStyleId={buildingStyleId}
           buildingsStatus={buildingsStatus}
           building={building}
