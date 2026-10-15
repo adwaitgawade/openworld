@@ -165,6 +165,11 @@ export default function GlobeStage({
         tracks={tracks}
         layers={layers}
         selectedId={selected?.id ?? null}
+        // `selected` is the sweep's track merged with the selection's own
+        // five-second fix, so it carries an altitude the sweep will not have
+        // for another minute. The globe draws from it rather than from its
+        // copy in `tracks`.
+        live={selected}
         pov={pov}
         tiltDeg={tiltDeg}
         trail={trail}

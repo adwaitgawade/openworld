@@ -78,6 +78,16 @@ type Props = {
   tracks: Track[];
   layers: Layers;
   selectedId: string | null;
+  /**
+   * The selection's own five-second fix, when there is one.
+   *
+   * `tracks` is the sixty-second sweep, which is a minute stale by the time it
+   * lands and coarse in altitude besides — an aircraft on approach loses a
+   * thousand feet between sweeps. The readout already draws on this fix; the
+   * globe has to as well, or the dot and the airframe hang at the sweep's
+   * altitude while the panel counts the descent down beside them.
+   */
+  live: Track | null;
   /** True while the camera should ride with the selection. */
   pov: boolean;
   /** Degrees below horizontal; in POV this is the chase angle. */
@@ -211,6 +221,26 @@ function layerOf(entry: { kind: "air" | "sea"; onGround: boolean }): LayerId {
   return entry.kind === "sea" ? "sea" : entry.onGround ? "ground" : "air";
 }
 
+/**
+ * Where a track is drawn vertically, and whether that height is trustworthy.
+ *
+ * Aircraft fly at their reported altitude; a vessel's `alt` is draught, which
+ * is depth below the waterline and not a height at all; and an aircraft on the
+ * surface sits on the terrain, wherever the sampler turns out to put it.
+ */
+function heightOf(
+  track: Track,
+  cache: Map<string, number>,
+): { onGround: boolean; height: number; grounded: boolean } {
+  const onGround = track.kind === "air" && Boolean(track.onGround);
+  if (onGround) {
+    const cached = cache.get(track.id);
+    return { onGround, height: cached ?? 0, grounded: cached != null };
+  }
+  const height = track.kind === "air" && track.alt != null ? track.alt * FT_TO_M : 0;
+  return { onGround, height, grounded: false };
+}
+
 /** A ring drawn once and reused as the selection marker's billboard image. */
 function selectionRing(): HTMLCanvasElement {
   const size = 44;
@@ -235,7 +265,7 @@ const HIGHLIGHT_COLOR = (Cesium: typeof import("cesium")) =>
 
 const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
   {
-    tracks, layers, selectedId, pov, tiltDeg, trail, route, stackId, buildingStyleId,
+    tracks, layers, selectedId, live, pov, tiltDeg, trail, route, stackId, buildingStyleId,
     onSelect, onCursor, onStats, onReady, onBuildingPick, onBuildingAnchor,
     onBuildingsStatus,
   },
@@ -303,6 +333,8 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
   /** Resolved terrain height per on-ground track, kept across rebuilds. */
   const groundHeightRef = useRef(new Map<string, number>());
   const selectedRef = useRef<string | null>(null);
+  /** The selection's latest own fix, read by `rebuild` when a sweep lands. */
+  const liveRef = useRef<Track | null>(null);
   // Read from the render loop, which must not re-subscribe when they change.
   const povRef = useRef(pov);
   const tiltRef = useRef(tiltDeg);
@@ -803,17 +835,14 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
     const cache = groundHeightRef.current;
     const seen = new Set<string>();
 
-    for (const t of tracks) {
-      const onGround = t.kind === "air" && Boolean(t.onGround);
-      // Aircraft fly at their reported altitude; a vessel's `alt` is draught,
-      // which is depth below the waterline and not a height at all; and one on
-      // the surface sits on the terrain, wherever that turns out to be.
-      const cached = onGround ? cache.get(t.id) : undefined;
-      const height = onGround
-        ? (cached ?? 0)
-        : t.kind === "air" && t.alt != null
-          ? t.alt * FT_TO_M
-          : 0;
+    // A sweep that lands mid-selection must not walk the selected aircraft back
+    // to the position it held a minute ago; its own fix is the fresher of the
+    // two, and the patch effect below has already applied it.
+    const fresher = liveRef.current;
+
+    for (const swept of tracks) {
+      const t = fresher && fresher.id === swept.id ? fresher : swept;
+      const { onGround, height, grounded } = heightOf(t, cache);
       if (onGround) seen.add(t.id);
       entries.push({
         id: t.id,
@@ -822,7 +851,7 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
         lat: t.lat,
         height,
         onGround,
-        grounded: cached != null,
+        grounded,
         hdg: t.hdg,
         sog: t.sog,
         fixedAt: t.fixedAt,
@@ -851,6 +880,42 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
   useEffect(() => {
     if (ready) rebuild();
   }, [ready, rebuild]);
+
+  // ── the selection's own fix ──────────────────────────────
+  // Patched onto the one entry rather than folded into `tracks`, which would
+  // tear down and rebuild fourteen thousand point primitives every five
+  // seconds. Altitude is the reason this exists — a descent is a hundred metres
+  // between polls and several hundred between sweeps — but the heading, speed
+  // and fix time go with it, or the render loop dead-reckons the fresh position
+  // forward from a stale clock.
+  useEffect(() => {
+    liveRef.current = live;
+    const Cesium = cesiumRef.current;
+    if (!ready || !Cesium || !live) return;
+
+    const entry = entriesRef.current.find((e) => e.id === live.id);
+    if (!entry) return;
+
+    const { onGround, height, grounded } = heightOf(live, groundHeightRef.current);
+    entry.lon = live.lon;
+    entry.lat = live.lat;
+    entry.height = height;
+    entry.hdg = live.hdg;
+    entry.sog = live.sog;
+    entry.fixedAt = live.fixedAt;
+    entry.point.position = Cesium.Cartesian3.fromDegrees(live.lon, live.lat, height);
+
+    // Touching down or lifting off moves the track between layers, so its
+    // colour and its visibility both have to follow.
+    if (onGround !== entry.onGround) {
+      entry.onGround = onGround;
+      entry.point.color = live.emergency
+        ? Cesium.Color.fromCssColorString(OFFLINE_COLOR)
+        : Cesium.Color.fromCssColorString(onGround ? GROUND_COLOR : AIR_COLOR);
+      layersDirtyRef.current = true;
+    }
+    entry.grounded = grounded;
+  }, [ready, live]);
 
   // ── settle surfaced aircraft onto the terrain ────────────
   // Runs after the rebuild above, on the entries it just produced. Anything the
