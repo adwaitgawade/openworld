@@ -9,6 +9,7 @@ import {
   type BuildingStyleId,
 } from "@/lib/buildings";
 import { fetchBuildingDetails, type BuildingDetails } from "@/lib/buildingDetails";
+import type { GeocodeResult } from "@/lib/geocode";
 import type { BuildingInfo } from "@/lib/buildingInfo";
 import { project } from "@/lib/watch/geo";
 import type { Alert, Track } from "@/lib/watch/types";
@@ -21,6 +22,7 @@ import { useFeed } from "./useFeed";
 import { useLiveTrack } from "./useLiveTrack";
 import { useAircraftDetail } from "./useAircraftDetail";
 import { useAirportSearch } from "./useAirportSearch";
+import { usePlaceSearch } from "./usePlaceSearch";
 import type {
   GlobeStats,
   LayerId,
@@ -197,6 +199,8 @@ export default function WatchConsole() {
   // Airport codes typed into the palette are resolved over the network, so the
   // hit arrives separately from the synchronous command list.
   const airportHit = useAirportSearch(paletteQuery);
+  // Place names go to the geocoder the same way, for the same reason.
+  const placeSearch = usePlaceSearch(paletteQuery);
 
   const aircraftDetail = useAircraftDetail(
     selected?.kind === "air" ? selected.id : null,
@@ -268,6 +272,10 @@ export default function WatchConsole() {
 
   const flyToAirport = useCallback((lon: number, lat: number) => {
     globeRef.current?.flyToAirport(lon, lat);
+  }, []);
+
+  const flyToPlace = useCallback((place: GeocodeResult) => {
+    globeRef.current?.flyToPlace(place);
   }, []);
 
   // ── actions ──────────────────────────────────────────────
@@ -506,15 +514,30 @@ export default function WatchConsole() {
         });
       }
 
+      // Geocoder hits, likewise, matched on more than the label shows.
+      const placeHits: Command[] = q
+        ? placeSearch.places.map((place) => {
+            const [head, ...rest] = place.name.split(",");
+            return {
+              scope: "PLACE",
+              label: `${head.trim()}${rest.length ? ` — ${rest.join(",").trim()}` : ""}`,
+              keys: place.type,
+              run: () => flyToPlace(place),
+            };
+          })
+        : [];
+
       if (!q) return commands;
       return [
         ...airportHits,
         ...trackHits,
+        ...placeHits,
         ...commands.filter((c) => `${c.scope} ${c.label}`.toLowerCase().includes(q)),
       ];
     },
     [
       tracks, layers, stackId, selected, selectTrack, airportHit, flyToAirport,
+      placeSearch.places, flyToPlace,
       toggleLayer, flyToTrack, copySelection, applyTilt,
       buildingStyleId, povActive, togglePov,
     ],
@@ -623,6 +646,7 @@ export default function WatchConsole() {
           }}
           commands={buildCommands}
           onQuery={setPaletteQuery}
+          searching={placeSearch.searching}
         />
       )}
 

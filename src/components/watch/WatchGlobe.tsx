@@ -22,6 +22,7 @@ import {
 } from "@/lib/mapStacks";
 import { buildingStyle, loadBuildings, type BuildingStyleId } from "@/lib/buildings";
 import { describeFeature, type BuildingInfo } from "@/lib/buildingInfo";
+import type { GeocodeResult } from "@/lib/geocode";
 
 import "cesium/Build/Cesium/Widgets/widgets.css";
 
@@ -70,6 +71,8 @@ export type WatchGlobeHandle = {
   flyTo(lon: number, lat: number, heightMetres?: number): void;
   /** Pulls back to a globe view, then descends on the field. */
   flyToAirport(lon: number, lat: number): void;
+  /** Same two-leg flight as an airport, framed to the place's extent. */
+  flyToPlace(place: GeocodeResult): void;
   /** Pivots to `deg` below horizontal around what the camera is looking at. */
   setTilt(deg: number): void;
 };
@@ -127,6 +130,14 @@ const AIRPORT_PULLBACK_M = 9_000_000;
 const AIRPORT_FIELD_RADIUS_M = 6_000;
 /** How far back the descent settles from that sphere. */
 const AIRPORT_RANGE_M = 16_000;
+/**
+ * Bounds on the sphere a searched place is framed against. Nominatim's boxes run
+ * from a single building to a whole country; the floor keeps a landmark from
+ * putting the camera on its roof, the ceiling keeps a continent from being
+ * framed from beyond the pullback apex.
+ */
+const PLACE_MIN_RADIUS_M = 250;
+const PLACE_MAX_RADIUS_M = 1_500_000;
 const LANE_COLOR = "#6E7F8C";
 const OFFLINE_COLOR = "#E8577F";
 
@@ -138,6 +149,62 @@ const STATS_INTERVAL_MS = 500;
 /** The scale bar's drawn width, matching `.wscalebar i` in watch.css. */
 const SCALEBAR_PX = 76;
 const FT_TO_M = 0.3048;
+const M_PER_DEG = 111_320;
+
+/**
+ * Two legs, because one is disorienting: the target can be a hemisphere away,
+ * and a single flight there skims the surface at low altitude with nothing
+ * recognisable passing underneath. Pulling back to where the whole globe is
+ * visible first makes the traverse legible, and the descent then lands looking
+ * north and slightly obliquely, so the ground reads as ground rather than as a
+ * map.
+ *
+ * `range` 0 lets Cesium pick the distance that fits the sphere.
+ */
+function flyDownTo(
+  Cesium: typeof import("cesium"),
+  viewer: Viewer,
+  lon: number,
+  lat: number,
+  radiusMetres: number,
+  range: number,
+) {
+  const { camera } = viewer;
+  camera.flyTo({
+    destination: Cesium.Cartesian3.fromDegrees(lon, lat, AIRPORT_PULLBACK_M),
+    duration: 1.5,
+    easingFunction: Cesium.EasingFunction.QUADRATIC_IN_OUT,
+    complete: () => {
+      if (viewer.isDestroyed()) return;
+      // Framed against a sphere rather than flown to a point: with a pitched
+      // camera a `destination` is where the camera ends up, not what it looks
+      // at, which leaves the target out of frame below. A bounding sphere keeps
+      // the target centred and lets Cesium solve for the position.
+      camera.flyToBoundingSphere(
+        new Cesium.BoundingSphere(Cesium.Cartesian3.fromDegrees(lon, lat), radiusMetres),
+        {
+          offset: new Cesium.HeadingPitchRange(0, Cesium.Math.toRadians(-60), range),
+          duration: 2.2,
+          easingFunction: Cesium.EasingFunction.QUADRATIC_OUT,
+        },
+      );
+    },
+  });
+}
+
+/** Half the diagonal of a geocoder hit's box, clamped to something frameable. */
+function placeRadius(place: GeocodeResult): number {
+  const bbox = place.bbox;
+  // No box, or one wrapped across the antimeridian (west > east): treat it as a point.
+  if (!bbox || bbox[2] <= bbox[0] || bbox[3] <= bbox[1]) return PLACE_MIN_RADIUS_M;
+  const [west, south, east, north] = bbox;
+  const halfLat = ((north - south) / 2) * M_PER_DEG;
+  const halfLon = ((east - west) / 2) * M_PER_DEG * Math.cos((place.lat * Math.PI) / 180);
+  return Math.min(
+    PLACE_MAX_RADIUS_M,
+    Math.max(PLACE_MIN_RADIUS_M, Math.hypot(halfLat, halfLon)),
+  );
+}
 
 /**
  * A surfaced aircraft is placed on the terrain, not at its reported altitude —
@@ -368,48 +435,17 @@ const WatchGlobe = forwardRef<WatchGlobeHandle, Props>(function WatchGlobe(
           duration: 1.6,
         });
       },
-      /**
-       * Two legs, because one is disorienting: an airport can be a hemisphere
-       * away, and a single flight there skims the surface at low altitude with
-       * nothing recognisable passing underneath. Pulling back to where the
-       * whole globe is visible first makes the traverse legible, and the
-       * descent then lands on the field looking north and slightly obliquely,
-       * so the runways read as ground rather than as a map.
-       */
       flyToAirport(lon, lat) {
         const viewer = viewerRef.current;
         const Cesium = cesiumRef.current;
         if (!viewer || !Cesium || viewer.isDestroyed()) return;
-
-        const { camera } = viewer;
-        camera.flyTo({
-          destination: Cesium.Cartesian3.fromDegrees(lon, lat, AIRPORT_PULLBACK_M),
-          duration: 1.5,
-          easingFunction: Cesium.EasingFunction.QUADRATIC_IN_OUT,
-          complete: () => {
-            if (viewer.isDestroyed()) return;
-            // Framed against a sphere the size of the field rather than flown
-            // to a point: with a pitched camera a `destination` is where the
-            // camera ends up, not what it looks at, which leaves the airport
-            // out of frame below. A bounding sphere keeps the target centred
-            // and lets Cesium solve for the position.
-            camera.flyToBoundingSphere(
-              new Cesium.BoundingSphere(
-                Cesium.Cartesian3.fromDegrees(lon, lat),
-                AIRPORT_FIELD_RADIUS_M,
-              ),
-              {
-                offset: new Cesium.HeadingPitchRange(
-                  0,
-                  Cesium.Math.toRadians(-60),
-                  AIRPORT_RANGE_M,
-                ),
-                duration: 2.2,
-                easingFunction: Cesium.EasingFunction.QUADRATIC_OUT,
-              },
-            );
-          },
-        });
+        flyDownTo(Cesium, viewer, lon, lat, AIRPORT_FIELD_RADIUS_M, AIRPORT_RANGE_M);
+      },
+      flyToPlace(place) {
+        const viewer = viewerRef.current;
+        const Cesium = cesiumRef.current;
+        if (!viewer || !Cesium || viewer.isDestroyed()) return;
+        flyDownTo(Cesium, viewer, place.lon, place.lat, placeRadius(place), 0);
       },
       /**
        * `lookAt` locks the camera into the target's reference frame, so the

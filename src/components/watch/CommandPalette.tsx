@@ -20,13 +20,15 @@ type Props = {
    * the synchronous `commands` call.
    */
   onQuery?: (query: string) => void;
+  /** A fetched result for the current query is still on its way. */
+  searching?: boolean;
 };
 
 /**
  * Mounted only while open, so each opening starts with an empty query and the
  * cursor at the top without an effect having to reset anything.
  */
-export default function CommandPalette({ onClose, commands, onQuery }: Props) {
+export default function CommandPalette({ onClose, commands, onQuery, searching }: Props) {
   const [query, setQuery] = useState("");
   const [cursor, setCursor] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -62,7 +64,7 @@ export default function CommandPalette({ onClose, commands, onQuery }: Props) {
           ref={inputRef}
           type="text"
           value={query}
-          placeholder="Run a command, or jump to a track or airport…"
+          placeholder="Run a command, or jump to a track, airport or place…"
           onChange={(e) => {
             setQuery(e.target.value);
             setCursor(0);
@@ -89,7 +91,7 @@ export default function CommandPalette({ onClose, commands, onQuery }: Props) {
 
         <div className="wpalist" ref={listRef}>
           {items.length === 0 ? (
-            <div className="wempty">No command matches.</div>
+            <div className="wempty">{searching ? "Searching places…" : "No command matches."}</div>
           ) : (
             items.map((command, i) => (
               <button

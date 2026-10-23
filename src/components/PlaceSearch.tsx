@@ -49,6 +49,9 @@ export default function PlaceSearch({
         if (controller.signal.aborted) return;
         setResults([]);
         setError(e instanceof Error ? e.message : "Search failed");
+        // The list is where the error is shown; without this a failed search
+        // looks exactly like one that is still loading.
+        setOpen(true);
       } finally {
         if (!controller.signal.aborted) setLoading(false);
       }
